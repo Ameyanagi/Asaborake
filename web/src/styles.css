@@ -1,0 +1,88 @@
+@import "tailwindcss";
+
+/*
+ * Asaborake reads like an instrument, because that is what it is: a box in a
+ * cupboard that measures recordings and reports what it did to them.
+ *
+ * The palette comes from a video scope face — blue-black rather than true
+ * black, with a graticule of hairlines — and the signal colours say what the
+ * machine decided. Amber is material kept, slate is material removed, cyan is
+ * a measurement rather than a judgement.
+ *
+ * It commits to dark. This is a screen watched at night, next to a tuner, to
+ * check what happened while you were asleep.
+ */
+@theme {
+  --color-ground: #0b1016;
+  --color-panel: #111923;
+  --color-raised: #16202c;
+  --color-rule: #1e2a38;
+  --color-rule-bright: #2b3b4d;
+
+  --color-ink: #c7d3e0;
+  --color-ink-dim: #6b7c90;
+  --color-ink-faint: #47576b;
+
+  /* Programme: what survives the cut. */
+  --color-programme: #e3a55c;
+  --color-programme-dim: #7a5a33;
+  /* Commercial: what does not. */
+  --color-commercial: #3d4c5e;
+  /* Measurements rather than decisions. */
+  --color-logo: #4fd1c5;
+  --color-silence: #8b7fd1;
+  --color-scene: #dbe6f2;
+
+  --color-alert: #e06c75;
+  --color-good: #7fc98a;
+
+  /* Nearly every value on this page is a number that should line up under the
+     one above it, so mono is the primary voice and prose is the exception. */
+  --font-mono:
+    ui-monospace, "SF Mono", "Menlo", "Cascadia Mono", "Roboto Mono",
+    "DejaVu Sans Mono", monospace;
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Helvetica Neue",
+    sans-serif;
+}
+
+html,
+body {
+  background: var(--color-ground);
+  color: var(--color-ink);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Channel-strip labels, as on hardware. */
+.eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-ink-faint);
+}
+
+/* Rows are separated by the graticule, not by boxes. */
+.rule-row {
+  border-bottom: 1px solid var(--color-rule);
+}
+
+.rule-row:hover {
+  background: var(--color-panel);
+}
+
+/* Focus has to be visible against a dark ground without glowing. */
+:where(a, button, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-logo);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
