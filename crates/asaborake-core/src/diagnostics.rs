@@ -15,6 +15,20 @@
 use asaborake_ts::{StreamKind, TsInfo};
 use serde::{Deserialize, Serialize};
 
+/// A bilingual programme's two languages, main channel first.
+///
+/// Japanese broadcast carries 二か国語 as a single audio stream in ARIB's
+/// "1/0 + 1/0 mode": two independent mono programmes, one per channel. A
+/// decoder sees an ordinary stereo pair, so treating it as one means both
+/// languages come out of the speakers at once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DualMono {
+    /// Language on the left channel, which carries the main programme.
+    pub main: Option<String>,
+    /// Language on the right channel.
+    pub sub: Option<String>,
+}
+
 /// How healthy a recording was, and what it contained.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Diagnostics {
@@ -36,6 +50,13 @@ pub struct Diagnostics {
     pub error_packets: u64,
     /// Total packets read, for putting the counters in proportion.
     pub total_packets: u64,
+    /// The two languages a bilingual programme carries, main first.
+    ///
+    /// Set only when the recording declares itself dual mono, which is the one
+    /// case where the two channels of an audio stream are not left and right
+    /// but two separate programmes.
+    #[serde(default)]
+    pub dual_mono: Option<DualMono>,
     /// Anything an operator should be told about, in plain words.
     pub warnings: Vec<String>,
 }
@@ -73,6 +94,21 @@ impl Diagnostics {
                 .any(|stream| stream.kind == StreamKind::Caption)
         });
 
+        // Dual mono lives on the main audio stream; a programme does not carry
+        // a second bilingual stream alongside it.
+        let dual_mono = program
+            .and_then(|program| {
+                program
+                    .audio()
+                    .into_iter()
+                    .find(|stream| stream.is_dual_mono())
+            })
+            .and_then(|stream| stream.audio.as_ref())
+            .map(|component| DualMono {
+                main: component.language.clone(),
+                sub: component.second_language.clone(),
+            });
+
         let mut diagnostics = Self {
             duration_seconds: info.duration_seconds,
             video,
@@ -83,6 +119,7 @@ impl Diagnostics {
             scrambled_packets: info.stats.scrambled_packets,
             error_packets: info.stats.error_packets,
             total_packets: info.packet_count,
+            dual_mono,
             warnings: Vec::new(),
         };
         diagnostics.warnings = diagnostics.describe_problems(info);
@@ -146,6 +183,15 @@ impl Diagnostics {
             warnings.push(format!(
                 "{} audio tracks, all carried through to the output",
                 self.audio.len()
+            ));
+        }
+
+        if let Some(dual) = &self.dual_mono {
+            warnings.push(format!(
+                "bilingual audio ({} and {}); the two channels are split into \
+                 separate tracks",
+                dual.main.as_deref().unwrap_or("unknown"),
+                dual.sub.as_deref().unwrap_or("unknown"),
             ));
         }
 
@@ -215,6 +261,20 @@ mod tests {
             stream_type,
             kind,
             component_tag: None,
+            audio: None,
+        }
+    }
+
+    /// An audio stream carrying two languages, one per channel.
+    fn bilingual(pid: u16) -> StreamInfo {
+        StreamInfo {
+            audio: Some(asaborake_ts::AudioComponent {
+                component_type: 0x02,
+                component_tag: 0x10,
+                language: Some("jpn".to_owned()),
+                second_language: Some("eng".to_owned()),
+            }),
+            ..stream(pid, StreamKind::AacAudio, 0x0F)
         }
     }
 
@@ -327,6 +387,43 @@ mod tests {
             "{:?}",
             diagnostics.warnings
         );
+    }
+
+    #[test]
+    fn a_bilingual_stream_is_recognised_from_the_pmt() {
+        // One stream, two languages, one per channel. Nothing about the stream
+        // itself distinguishes it from stereo — only this descriptor does.
+        let streams = vec![
+            stream(0x0111, StreamKind::Mpeg2Video, 0x02),
+            bilingual(0x0112),
+        ];
+        let diagnostics = Diagnostics::from_ts(&info(TsStats::default(), 1_000_000, streams));
+
+        let dual = diagnostics.dual_mono.as_ref().expect("bilingual");
+        assert_eq!(dual.main.as_deref(), Some("jpn"));
+        assert_eq!(dual.sub.as_deref(), Some("eng"));
+        assert!(
+            diagnostics.warnings.iter().any(|w| w.contains("bilingual")),
+            "{:?}",
+            diagnostics.warnings
+        );
+
+        // One audio *stream*, so the multiple-tracks note must not also fire.
+        assert_eq!(diagnostics.audio.len(), 1);
+        assert!(
+            !diagnostics
+                .warnings
+                .iter()
+                .any(|w| w.contains("audio tracks")),
+            "{:?}",
+            diagnostics.warnings
+        );
+    }
+
+    #[test]
+    fn an_ordinary_recording_is_not_called_bilingual() {
+        let diagnostics = Diagnostics::from_ts(&info(TsStats::default(), 1_000_000, healthy()));
+        assert_eq!(diagnostics.dual_mono, None);
     }
 
     #[test]

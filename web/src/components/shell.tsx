@@ -89,7 +89,15 @@ export function Failure({ message }: { message: string }) {
       <div className="eyebrow" style={{ color: "var(--color-alert)" }}>
         failed
       </div>
-      <p className="mt-1.5 font-sans text-ink">{message}</p>
+      {/*
+        An engine failure carries its cause underneath it, one per line, and a
+        tail of ffmpeg's own output. Collapsing that into a paragraph runs
+        separate facts together into something nobody will read, so the breaks
+        are kept and the mono face makes the ffmpeg lines legible.
+      */}
+      <p className="mt-1.5 max-h-64 overflow-y-auto text-[13px] leading-relaxed whitespace-pre-wrap text-ink">
+        {message}
+      </p>
     </div>
   );
 }

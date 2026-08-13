@@ -11,7 +11,7 @@ use std::io::Read;
 use crate::Error;
 use crate::packet::{ContinuityTracker, PID_NULL, PID_PAT, PacketLayout, TsPacket, detect_layout};
 use crate::pes::{PesHeader, PtsUnwrapper};
-use crate::psi::{Pat, Pmt, SectionAssembler, StreamKind};
+use crate::psi::{AudioComponent, Eit, PID_EIT, Pat, Pmt, SectionAssembler, StreamKind};
 use crate::video::{VideoFormat, parse_h264_sps, parse_mpeg2_sequence_header};
 
 /// Counters describing how healthy the recording is.
@@ -58,6 +58,20 @@ pub struct StreamInfo {
     pub kind: StreamKind,
     /// ARIB component tag, when the PMT carried one.
     pub component_tag: Option<u8>,
+    /// Channel arrangement and languages, for an audio stream that declares
+    /// them. This is where a bilingual programme says it is bilingual.
+    #[serde(default)]
+    pub audio: Option<AudioComponent>,
+}
+
+impl StreamInfo {
+    /// Whether this stream carries two languages, one per channel.
+    #[must_use]
+    pub fn is_dual_mono(&self) -> bool {
+        self.audio
+            .as_ref()
+            .is_some_and(AudioComponent::is_dual_mono)
+    }
 }
 
 /// One program carried in the transport stream.
@@ -235,6 +249,10 @@ struct ScanState {
     /// `pmt_pid` -> parsed PMT.
     pmts: BTreeMap<u16, Pmt>,
 
+    eit_assembler: SectionAssembler,
+    /// `service_id` -> what its present event says about its audio.
+    audio_components: BTreeMap<u16, Vec<AudioComponent>>,
+
     video_pid: Option<u16>,
     video_kind: Option<StreamKind>,
     /// Partial elementary-stream bytes for the current video access unit.
@@ -262,6 +280,8 @@ impl ScanState {
             pmt_assemblers: HashMap::new(),
             pat: BTreeMap::new(),
             pmts: BTreeMap::new(),
+            eit_assembler: SectionAssembler::new(),
+            audio_components: BTreeMap::new(),
             video_pid: None,
             video_kind: None,
             video_unit: Vec::new(),
@@ -296,6 +316,7 @@ impl ScanState {
 
         match packet.pid {
             PID_PAT => self.handle_pat(packet),
+            PID_EIT => self.handle_eit(packet),
             pid if self.pat.values().any(|&p| p == pid) => self.handle_pmt(pid, packet),
             pid if Some(pid) == self.video_pid => self.handle_video(packet),
             _ => {}
@@ -310,6 +331,22 @@ impl ScanState {
             for (program_number, pmt_pid) in pat.programs {
                 self.pat.insert(program_number, pmt_pid);
                 self.pmt_assemblers.entry(pmt_pid).or_default();
+            }
+        }
+    }
+
+    /// Read what the present programme says about its own audio.
+    ///
+    /// This is the only place a recording states that it is bilingual, and it
+    /// lives here rather than in the PMT because the languages a programme
+    /// carries belong to the programme, not to the multiplex.
+    fn handle_eit(&mut self, packet: &TsPacket<'_>) {
+        for section in self.eit_assembler.push(packet) {
+            let Some(eit) = Eit::parse(&section) else {
+                continue;
+            };
+            if !eit.audio.is_empty() {
+                self.audio_components.insert(eit.service_id, eit.audio);
             }
         }
     }
@@ -412,6 +449,9 @@ impl ScanState {
             .iter()
             .filter_map(|(&program_number, &pmt_pid)| {
                 let pmt = self.pmts.get(&pmt_pid)?;
+                // The event table describes streams by component tag; the PMT
+                // is what maps a tag to a PID.
+                let components = self.audio_components.get(&program_number);
                 Some(ProgramInfo {
                     program_number,
                     pmt_pid,
@@ -424,6 +464,12 @@ impl ScanState {
                             stream_type: es.stream_type,
                             kind: StreamKind::resolve(es.stream_type, es.component_tag),
                             component_tag: es.component_tag,
+                            audio: es.component_tag.and_then(|tag| {
+                                components?
+                                    .iter()
+                                    .find(|component| component.component_tag == tag)
+                                    .cloned()
+                            }),
                         })
                         .collect(),
                 })

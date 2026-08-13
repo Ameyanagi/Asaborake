@@ -25,6 +25,7 @@ use asaborake_cmcut::KeepRange;
 use asaborake_media::{Chapter, Ffmpeg, MediaProbe, Progress};
 
 use crate::Error;
+use crate::diagnostics::DualMono;
 use crate::profile::Profile;
 
 /// Everything needed to encode one output file.
@@ -42,6 +43,30 @@ pub struct EncodeRequest<'a> {
     pub chapters: &'a [Chapter],
     /// What ffmpeg reported about the source.
     pub probe: &'a MediaProbe,
+    /// The two languages carried on one stream's two channels, when the
+    /// recording declared itself bilingual.
+    pub dual_mono: Option<&'a DualMono>,
+}
+
+/// One audio track in the output, and where it comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioTrack {
+    /// Index of the source audio stream.
+    pub source: usize,
+    /// Which channel of that stream to take, when the stream carries two
+    /// separate programmes rather than a stereo pair.
+    pub channel: Option<Channel>,
+    /// Language to tag the track with.
+    pub language: Option<String>,
+}
+
+/// One side of a dual-mono stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Channel {
+    /// The left channel, which carries the main programme.
+    Left,
+    /// The right channel, which carries the second language.
+    Right,
 }
 
 /// How the audio streams are carried into the output.
@@ -70,19 +95,64 @@ impl EncodeRequest<'_> {
     }
 
     /// How many audio streams the source carries.
-    ///
-    /// Every one becomes a track. Japanese broadcast routinely carries two —
-    /// a bilingual programme's main and sub language — and mapping only the
-    /// first silently discards the second.
     #[must_use]
     pub fn audio_streams(&self) -> usize {
         self.probe.audio.len().max(1)
+    }
+
+    /// The audio tracks the output will carry.
+    ///
+    /// Normally one per source stream. A bilingual programme is the exception:
+    /// it carries both languages on the two channels of a *single* stream, so
+    /// that stream becomes two mono tracks instead of one stereo track. Left
+    /// alone it would play both languages at once.
+    #[must_use]
+    pub fn audio_tracks(&self) -> Vec<AudioTrack> {
+        let language = |index: usize| {
+            self.probe
+                .audio
+                .get(index)
+                .and_then(|stream| stream.language.clone())
+        };
+
+        let mut tracks = Vec::new();
+        if let Some(dual) = self.dual_mono {
+            tracks.push(AudioTrack {
+                source: 0,
+                channel: Some(Channel::Left),
+                // The PMT names the languages; ffprobe's tag describes the
+                // stream as a whole and so cannot tell the two channels apart.
+                language: dual.main.clone().or_else(|| language(0)),
+            });
+            tracks.push(AudioTrack {
+                source: 0,
+                channel: Some(Channel::Right),
+                language: dual.sub.clone(),
+            });
+        }
+
+        // Any remaining streams are ordinary tracks. The first is skipped when
+        // it has already been split above.
+        let first = usize::from(self.dual_mono.is_some());
+        for index in first..self.audio_streams() {
+            tracks.push(AudioTrack {
+                source: index,
+                channel: None,
+                language: language(index),
+            });
+        }
+        tracks
     }
 
     /// Whether the audio can be copied rather than re-encoded.
     #[must_use]
     pub fn audio_plan(&self) -> AudioPlan {
         if self.is_cutting() {
+            return AudioPlan::Reencode;
+        }
+        // Splitting a bilingual stream into two tracks means separating its
+        // channels, and channels only exist once the stream has been decoded.
+        if self.dual_mono.is_some() {
             return AudioPlan::Reencode;
         }
         // A container that cannot carry the source codec forces a re-encode
@@ -174,10 +244,11 @@ fn build_command(
     let mut command = ffmpeg.command();
     command.arg("-y");
 
-    // Dual-mono decoding is an *input* option and must precede `-i`, or
-    // ffmpeg silently ignores it and merges both languages together.
-    if request.probe.is_dual_mono() {
-        command.args(["-dual_mono_mode", &profile.audio.dual_mono_mode]);
+    // Dual-mono decoding is an *input* option and must precede `-i`, or ffmpeg
+    // silently ignores it. `both` is what keeps the second language present at
+    // all; the split into separate tracks happens in the filter graph.
+    if request.dual_mono.is_some() {
+        command.args(["-dual_mono_mode", "both"]);
     }
     // Terrestrial recordings routinely contain corrupt packets. Dropping them
     // beats aborting a job that is otherwise fine.
@@ -191,7 +262,7 @@ fn build_command(
     }
 
     let plan = request.audio_plan();
-    let streams = request.audio_streams();
+    let tracks = request.audio_tracks();
 
     let graph = filter_graph(request, interlaced);
     command.args(["-filter_complex", &graph]);
@@ -199,14 +270,14 @@ fn build_command(
 
     match plan {
         AudioPlan::Copy => {
-            // Straight from the source, one map per stream, so a bilingual
-            // programme keeps both languages.
-            for index in 0..streams {
-                command.args(["-map", &format!("0:a:{index}?")]);
+            // Straight from the source, one map per stream, so a programme
+            // with two audio streams keeps both.
+            for track in &tracks {
+                command.args(["-map", &format!("0:a:{}?", track.source)]);
             }
         }
         AudioPlan::Reencode => {
-            for index in 0..streams {
+            for index in 0..tracks.len() {
                 command.args(["-map", &format!("[a{index}]")]);
             }
         }
@@ -223,15 +294,21 @@ fn build_command(
             command.arg("-c:a").arg(&profile.audio.encoder);
             command.args(&profile.audio.args);
             // Channel and rate conversion only make sense when decoding; with
-            // a copy they would contradict the stream being copied.
-            command.args(["-ac", &profile.audio.channels.to_string()]);
+            // a copy they would contradict the stream being copied. A split
+            // bilingual track is already exactly one channel, and the profile's
+            // stereo would only duplicate it at twice the bitrate.
+            if request.dual_mono.is_none() {
+                command.args(["-ac", &profile.audio.channels.to_string()]);
+            }
             command.args(["-ar", &profile.audio.sample_rate.to_string()]);
         }
     }
 
     // Carry each track's language through, so a player can offer the choice.
-    for (index, stream) in request.probe.audio.iter().enumerate() {
-        if let Some(language) = stream.language.as_deref() {
+    // This is the only thing that distinguishes a bilingual programme's two
+    // tracks once they are separated.
+    for (index, track) in tracks.iter().enumerate() {
+        if let Some(language) = track.language.as_deref() {
             command.args([
                 &format!("-metadata:s:a:{index}"),
                 &format!("language={language}"),
@@ -298,12 +375,40 @@ fn filter_graph(request: &EncodeRequest<'_>, interlaced: bool) -> String {
 
     let mut chains = vec![format!("[0:v]{}[v]", video.join(","))];
 
-    // One chain per audio stream when re-encoding; none at all when copying,
+    // One chain per output track when re-encoding; none at all when copying,
     // since a copied stream is mapped straight from the input.
     if request.audio_plan() == AudioPlan::Reencode {
         let joined = audio.join(",");
-        for index in 0..request.audio_streams() {
-            chains.push(format!("[0:a:{index}]{joined}[a{index}]"));
+        let tracks = request.audio_tracks();
+
+        // A bilingual stream is selected once and then split, rather than
+        // decoded twice: `channelsplit` yields both channels from one pass.
+        if let Some(split) = tracks
+            .iter()
+            .position(|track| track.channel == Some(Channel::Left))
+        {
+            let right = split + 1;
+            // The first `aformat` guards the split: a recording whose
+            // descriptor claims bilingual but which decodes as mono would
+            // otherwise fail the whole job, and producing the same audio on
+            // both tracks beats producing no file.
+            chains.push(format!(
+                "[0:a:0]{joined},aformat=channel_layouts=stereo,\
+                 channelsplit=channel_layout=stereo[s{split}][s{right}]"
+            ));
+            // `channelsplit` labels its outputs by position — "1 channels (FL)"
+            // — which the AAC encoder refuses. They have to be renamed to plain
+            // mono before they reach it.
+            for pad in [split, right] {
+                chains.push(format!("[s{pad}]aformat=channel_layouts=mono[a{pad}]"));
+            }
+        }
+
+        for (index, track) in tracks.iter().enumerate() {
+            if track.channel.is_some() {
+                continue;
+            }
+            chains.push(format!("[0:a:{}]{joined}[a{index}]", track.source));
         }
     }
 
@@ -373,6 +478,15 @@ mod tests {
             keep,
             chapters: &[],
             probe,
+            dual_mono: None,
+        }
+    }
+
+    /// A bilingual programme: two languages on one stream's two channels.
+    fn bilingual() -> DualMono {
+        DualMono {
+            main: Some("jpn".to_owned()),
+            sub: Some("eng".to_owned()),
         }
     }
 
@@ -557,6 +671,87 @@ mod tests {
             2,
             "one per stream: {graph}"
         );
+    }
+
+    #[test]
+    fn a_bilingual_stream_becomes_two_tracks_with_their_own_languages() {
+        // Japanese broadcast carries 二か国語 on the two channels of ONE stream.
+        // Treated as stereo, both languages come out of the speakers at once.
+        let profile = builtin().remove("x264-cpu").expect("profile");
+        let probe = probe_with_audio(true, 600.0, 1);
+        let keep = [KeepRange {
+            start: 0.0,
+            end: 600.0,
+        }];
+        let dual = bilingual();
+        let request = EncodeRequest {
+            dual_mono: Some(&dual),
+            ..request(&profile, &keep, &probe)
+        };
+
+        let tracks = request.audio_tracks();
+        assert_eq!(tracks.len(), 2, "{tracks:?}");
+        assert_eq!(tracks[0].channel, Some(Channel::Left));
+        assert_eq!(tracks[0].language.as_deref(), Some("jpn"));
+        assert_eq!(tracks[1].channel, Some(Channel::Right));
+        assert_eq!(tracks[1].language.as_deref(), Some("eng"));
+        // Both come from the same stream, so it is decoded once.
+        assert_eq!(tracks[0].source, tracks[1].source);
+
+        // Splitting channels means decoding, so copying is off the table even
+        // though nothing is being cut.
+        assert_eq!(request.audio_plan(), AudioPlan::Reencode);
+
+        let graph = filter_graph(&request, true);
+        assert!(graph.contains("channelsplit"), "{graph}");
+        // Both halves come out as their own labelled track.
+        assert!(graph.contains("[a0]"), "{graph}");
+        assert!(graph.contains("[a1]"), "{graph}");
+        // Named plain mono, which is the only layout the AAC encoder accepts.
+        assert_eq!(
+            graph.matches("aformat=channel_layouts=mono").count(),
+            2,
+            "{graph}"
+        );
+        assert_eq!(
+            graph.matches("[0:a:").count(),
+            1,
+            "the stream is read once, not twice: {graph}"
+        );
+    }
+
+    #[test]
+    fn a_bilingual_programme_tags_both_of_its_languages() {
+        let profile = builtin().remove("x264-cpu").expect("profile");
+        let probe = probe_with_audio(true, 600.0, 1);
+        let keep = [KeepRange {
+            start: 0.0,
+            end: 600.0,
+        }];
+        let dual = bilingual();
+        let request = EncodeRequest {
+            dual_mono: Some(&dual),
+            ..request(&profile, &keep, &probe)
+        };
+        let Ok(ffmpeg) = Ffmpeg::discover(None, None) else {
+            eprintln!("skipping: no ffmpeg");
+            return;
+        };
+        let command = build_command(&ffmpeg, &request, None);
+        let args: Vec<String> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let line = args.join(" ");
+
+        // Without `both`, the decoder discards one of the two languages before
+        // the filter graph ever sees it.
+        assert!(line.contains("-dual_mono_mode both"), "{line}");
+        assert!(line.contains("language=jpn"), "{line}");
+        assert!(line.contains("language=eng"), "{line}");
+        // Each split track is one channel already; the profile's stereo would
+        // only duplicate it at twice the bitrate.
+        assert!(!line.contains("-ac"), "{line}");
     }
 
     #[test]

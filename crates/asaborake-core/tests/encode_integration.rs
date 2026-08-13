@@ -105,6 +105,7 @@ fn cutting_removes_exactly_the_ranges_that_were_not_kept() {
             keep: &keep,
             chapters: &[],
             probe: &source,
+            dual_mono: None,
         },
         &mut |fraction| seen_progress.push(fraction),
     )
@@ -148,6 +149,7 @@ fn a_single_full_length_range_passes_the_clip_through_unchanged() {
             keep: &keep,
             chapters: &[],
             probe: &source,
+            dual_mono: None,
         },
         &mut |_| {},
     )
@@ -197,6 +199,7 @@ fn chapters_reach_the_output_file() {
             keep: &keep,
             chapters: &chapters,
             probe: &source,
+            dual_mono: None,
         },
         &mut |_| {},
     )
@@ -316,6 +319,7 @@ fn both_audio_tracks_survive_a_cut() {
             keep: &keep,
             chapters: &[],
             probe: &source,
+            dual_mono: None,
         },
         &mut |_| {},
     )
@@ -357,6 +361,7 @@ fn audio_is_copied_when_nothing_is_cut() {
             keep: &keep,
             chapters: &[],
             probe: &source,
+            dual_mono: None,
         },
         &mut |_| {},
     )
@@ -368,6 +373,103 @@ fn audio_is_copied_when_nothing_is_cut() {
         result.audio.iter().all(|a| a.codec == "aac"),
         "copied streams stay AAC: {:?}",
         result.audio
+    );
+}
+
+/// Render a clip with one stereo audio stream carrying a different tone in
+/// each channel, as an ARIB bilingual programme carries a language per channel.
+fn render_dual_mono(path: &Path, seconds: u32) {
+    let status = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc=size=160x120:rate=25:duration={seconds}"),
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency=440:sample_rate=48000:duration={seconds}"),
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency=880:sample_rate=48000:duration={seconds}"),
+        ])
+        // One stream, two channels, a different programme on each.
+        .args(["-filter_complex", "[1:a][2:a]amerge=inputs=2[a]"])
+        .args(["-map", "0:v", "-map", "[a]"])
+        .args([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .args(["-c:a", "aac", "-shortest"])
+        .arg(path)
+        .status()
+        .expect("ffmpeg runs");
+    assert!(status.success(), "failed to render the dual-mono clip");
+}
+
+#[test]
+fn a_bilingual_programme_comes_out_as_two_single_language_tracks() {
+    // The filter graph that splits the channels is a string handed to ffmpeg,
+    // so a mistake in it fails at runtime rather than at compile time. This
+    // runs it.
+    let Some(ffmpeg) = ffmpeg() else { return };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let input = dir.path().join("in.mp4");
+    let output = dir.path().join("out.mp4");
+    render_dual_mono(&input, 6);
+
+    let source = probe(&ffmpeg, &input).expect("probe");
+    assert_eq!(source.audio.len(), 1, "the fixture is one stream");
+    assert_eq!(source.audio[0].channels, 2, "carrying two channels");
+
+    let keep = [KeepRange {
+        start: 0.0,
+        end: source.duration_seconds.expect("a duration"),
+    }];
+    let dual = asaborake_core::diagnostics::DualMono {
+        main: Some("jpn".into()),
+        sub: Some("eng".into()),
+    };
+    let profile = cpu_profile();
+
+    encode(
+        &ffmpeg,
+        &EncodeRequest {
+            input: &input,
+            output: &output,
+            profile: &profile,
+            keep: &keep,
+            chapters: &[],
+            probe: &source,
+            dual_mono: Some(&dual),
+        },
+        &mut |_| {},
+    )
+    .expect("encode succeeds");
+
+    let result = probe(&ffmpeg, &output).expect("probe output");
+    assert_eq!(result.audio.len(), 2, "one track per language");
+    assert!(
+        result.audio.iter().all(|a| a.channels == 1),
+        "each language is mono, not a duplicated stereo pair: {:?}",
+        result.audio
+    );
+
+    let languages: Vec<Option<&str>> = result.audio.iter().map(|a| a.language.as_deref()).collect();
+    assert_eq!(
+        languages,
+        vec![Some("jpn"), Some("eng")],
+        "the tags are the only thing telling the two apart"
     );
 }
 
@@ -395,6 +497,7 @@ fn a_profile_the_build_cannot_run_fails_before_doing_any_work() {
             keep: &[],
             chapters: &[],
             probe: &source,
+            dual_mono: None,
         },
         &mut |_| {},
     )

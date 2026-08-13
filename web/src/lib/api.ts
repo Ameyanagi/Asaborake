@@ -144,6 +144,8 @@ export interface Diagnostics {
   scrambled_packets: number;
   error_packets: number;
   total_packets: number;
+  /** Set when the recording carries two languages on one stream's channels. */
+  dual_mono: { main: string | null; sub: string | null } | null;
   warnings: string[];
 }
 

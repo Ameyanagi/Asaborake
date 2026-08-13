@@ -11,6 +11,11 @@ use crate::packet::TsPacket;
 const TABLE_ID_PAT: u8 = 0x00;
 /// Table id of the Program Map Table.
 const TABLE_ID_PMT: u8 = 0x02;
+/// Table id of this multiplex's present/following Event Information Table.
+const TABLE_ID_EIT_PF: u8 = 0x4E;
+
+/// PID carrying the Event Information Table.
+pub const PID_EIT: u16 = 0x0012;
 
 /// Reassembles PSI sections arriving on one PID.
 #[derive(Debug, Default)]
@@ -141,6 +146,43 @@ pub struct EsInfo {
     pub component_tag: Option<u8>,
 }
 
+/// What the ARIB audio component descriptor says about an audio stream.
+///
+/// This is the only place a recording states that it is bilingual. A dual-mono
+/// stream looks exactly like stereo to a decoder — two channels, one AAC
+/// stream — so without reading this, a bilingual programme is transcoded with
+/// both languages talking over each other in the same stereo pair.
+///
+/// It appears in the *event* information table rather than the program map:
+/// what languages a programme carries is a property of the programme, not of
+/// the multiplex, and it changes when the programme does.
+///
+/// Defined in ARIB STD-B10 part 2, 6.2.26.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AudioComponent {
+    /// Channel arrangement: `0x02` is dual mono, `0x03` stereo, `0x01` mono.
+    pub component_type: u8,
+    /// Which elementary stream this describes, matched against the stream
+    /// identifier descriptor in the PMT.
+    pub component_tag: u8,
+    /// Language of the stream, or of its main channel when dual mono.
+    pub language: Option<String>,
+    /// Language of the second channel, present only on a dual-mono stream
+    /// that declares one.
+    pub second_language: Option<String>,
+}
+
+impl AudioComponent {
+    /// Whether this stream carries two languages, one per channel.
+    ///
+    /// `0x02` is ARIB's "1/0 + 1/0 mode": two independent mono programmes
+    /// sharing one stream, which is how Japanese broadcast carries 二か国語.
+    #[must_use]
+    pub const fn is_dual_mono(&self) -> bool {
+        self.component_type == 0x02
+    }
+}
+
 /// Program Map Table: the elementary streams making up one program.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Pmt {
@@ -210,6 +252,143 @@ fn find_component_tag(mut descriptors: &[u8]) -> Option<u8> {
         descriptors = &descriptors[2 + len..];
     }
     None
+}
+
+/// Collect every ARIB audio component descriptor (tag 0xC4) in a loop.
+///
+/// A bilingual programme lists one per audio stream, so this returns all of
+/// them rather than the first.
+fn find_audio_components(mut descriptors: &[u8]) -> Vec<AudioComponent> {
+    let mut found = Vec::new();
+    while descriptors.len() >= 2 {
+        let tag = descriptors[0];
+        let len = usize::from(descriptors[1]);
+        let Some(body) = descriptors.get(2..2 + len) else {
+            break;
+        };
+        if tag == 0xC4
+            && let Some(component) = parse_audio_component(body)
+        {
+            found.push(component);
+        }
+        descriptors = &descriptors[2 + len..];
+    }
+    found
+}
+
+/// Interpret the body of an audio component descriptor.
+///
+/// ```text
+/// 0        4 bits reserved, 4 bits stream_content (0x02 for audio)
+/// 1        component_type
+/// 2        component_tag
+/// 3        stream_type
+/// 4        simulcast_group_tag
+/// 5        ES_multi_lingual_flag, main_component_flag, quality_indicator,
+///          sampling_rate, reserved
+/// 6..9     ISO 639 language code
+/// 9..12    second ISO 639 language code, only when ES_multi_lingual_flag
+/// ```
+fn parse_audio_component(body: &[u8]) -> Option<AudioComponent> {
+    // Everything up to and including the first language code; the trailing
+    // free text is not read.
+    if body.len() < 9 {
+        return None;
+    }
+    // Only an audio stream may be described here. A descriptor claiming
+    // otherwise is malformed and its component_type would mean something else.
+    if body[0] & 0x0F != 0x02 {
+        return None;
+    }
+
+    let multilingual = body[5] & 0x80 != 0;
+    let language = language_code(body.get(6..9));
+    let second_language = if multilingual {
+        language_code(body.get(9..12))
+    } else {
+        None
+    };
+
+    Some(AudioComponent {
+        component_type: body[1],
+        component_tag: body[2],
+        language,
+        second_language,
+    })
+}
+
+/// Event Information Table: what programme is on, and what it carries.
+///
+/// Only the present/following table on PID 0x0012 is read, and only for what
+/// it says about audio. The schedule tables carry the same descriptors for
+/// every programme of the next week, which is of no use to a recording that
+/// has already happened.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Eit {
+    /// Service the events belong to.
+    pub service_id: u16,
+    /// Audio components described by the first event in the section, which for
+    /// the present/following table is the programme being recorded.
+    pub audio: Vec<AudioComponent>,
+}
+
+impl Eit {
+    /// Parse a present/following EIT section.
+    ///
+    /// Returns `None` for any other table, including the schedule tables.
+    #[must_use]
+    pub fn parse(section: &[u8]) -> Option<Self> {
+        // 0x4E is this multiplex's own present/following table; 0x4F describes
+        // other services and cannot say anything about this recording.
+        if section.first()? != &TABLE_ID_EIT_PF {
+            return None;
+        }
+        let service_id = (u16::from(*section.get(3)?) << 8) | u16::from(*section.get(4)?);
+        // Section 0 is the present event; section 1 is what follows it, which
+        // is a different programme.
+        if section.get(6)? != &0 {
+            return None;
+        }
+
+        let body = section_body(section)?;
+        // transport_stream_id, original_network_id, segment_last_section_number
+        // and last_table_id, none of which are needed here.
+        let events = body.get(6..)?;
+
+        // One event per present/following section in practice, but the loop is
+        // written for the general case.
+        let mut cursor = 0;
+        while cursor + 12 <= events.len() {
+            let length =
+                ((usize::from(events[cursor + 10]) & 0x0F) << 8) | usize::from(events[cursor + 11]);
+            let start = cursor + 12;
+            let end = start + length;
+            let descriptors = events.get(start..end)?;
+            let audio = find_audio_components(descriptors);
+            if !audio.is_empty() {
+                return Some(Self { service_id, audio });
+            }
+            cursor = end;
+        }
+
+        Some(Self {
+            service_id,
+            audio: Vec::new(),
+        })
+    }
+}
+
+/// Read a three-byte ISO 639 language code.
+///
+/// Broadcast fills unused codes with spaces or zeroes rather than omitting
+/// them, so anything that is not three letters is treated as absent.
+fn language_code(bytes: Option<&[u8]>) -> Option<String> {
+    let bytes = bytes?;
+    let code: String = bytes
+        .iter()
+        .map(|&b| char::from(b).to_ascii_lowercase())
+        .collect();
+    code.chars().all(|c| c.is_ascii_lowercase()).then_some(code)
 }
 
 /// What an elementary stream carries, resolved from its stream type.
@@ -338,6 +517,135 @@ mod tests {
         );
         assert!(StreamKind::resolve(pmt.streams[0].stream_type, None).is_video());
         assert!(StreamKind::resolve(pmt.streams[1].stream_type, None).is_audio());
+    }
+
+    /// An audio component descriptor, per ARIB STD-B10 part 2, 6.2.26.
+    fn audio_descriptor(component_type: u8, tag: u8, languages: &[&str]) -> Vec<u8> {
+        let multilingual = languages.len() > 1;
+        let mut body = vec![
+            0x02, // reserved + stream_content = audio
+            component_type,
+            tag,
+            0x0F, // stream_type
+            0x00, // simulcast_group_tag
+            if multilingual { 0xB1 } else { 0x31 },
+        ];
+        for language in languages {
+            body.extend_from_slice(language.as_bytes());
+        }
+        body.push(b'X'); // one byte of the trailing free text
+        let mut descriptor = vec![0xC4, u8::try_from(body.len()).expect("short descriptor")];
+        descriptor.extend_from_slice(&body);
+        descriptor
+    }
+
+    /// A present/following EIT section carrying one event and its descriptors.
+    fn eit_section(service_id: u16, section_number: u8, descriptors: &[u8]) -> Vec<u8> {
+        let length = u16::try_from(descriptors.len()).expect("short descriptor loop");
+        let mut event = vec![
+            0x00,
+            0x01, // event_id
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00, // start_time
+            0x00,
+            0x30,
+            0x00, // duration
+            0x80 | u8::try_from(length >> 8).expect("fits"),
+            u8::try_from(length & 0xFF).expect("fits"),
+        ];
+        event.extend_from_slice(descriptors);
+
+        let mut body = vec![
+            0x00, 0x01, // transport_stream_id
+            0x00, 0x02, // original_network_id
+            0x00, // segment_last_section_number
+            0x4E, // last_table_id
+        ];
+        body.extend_from_slice(&event);
+
+        let mut section = section(TABLE_ID_EIT_PF, &body);
+        // `section` writes a fixed long-form header; the service id and the
+        // section number are what this table is keyed on.
+        section[3] = u8::try_from(service_id >> 8).expect("fits");
+        section[4] = u8::try_from(service_id & 0xFF).expect("fits");
+        section[6] = section_number;
+        section
+    }
+
+    #[test]
+    fn reads_a_bilingual_programme_from_the_event_table() {
+        // Japanese broadcast carries a bilingual programme as one AAC stream in
+        // "1/0 + 1/0 mode", which is indistinguishable from stereo to a
+        // decoder. This descriptor is the only place it says otherwise.
+        let descriptor = audio_descriptor(0x02, 0x10, &["jpn", "eng"]);
+        let eit = Eit::parse(&eit_section(1024, 0, &descriptor)).expect("eit");
+
+        assert_eq!(eit.service_id, 1024);
+        assert_eq!(eit.audio.len(), 1);
+        assert!(eit.audio[0].is_dual_mono());
+        assert_eq!(eit.audio[0].component_tag, 0x10);
+        assert_eq!(eit.audio[0].language.as_deref(), Some("jpn"));
+        assert_eq!(eit.audio[0].second_language.as_deref(), Some("eng"));
+    }
+
+    #[test]
+    fn an_ordinary_stereo_programme_is_not_dual_mono() {
+        let descriptor = audio_descriptor(0x03, 0x10, &["jpn"]);
+        let eit = Eit::parse(&eit_section(1024, 0, &descriptor)).expect("eit");
+
+        assert!(!eit.audio[0].is_dual_mono());
+        assert_eq!(eit.audio[0].language.as_deref(), Some("jpn"));
+        assert_eq!(eit.audio[0].second_language, None);
+    }
+
+    #[test]
+    fn the_following_event_is_a_different_programme_and_is_ignored() {
+        // Section 1 describes what comes next, which is not what was recorded.
+        let descriptor = audio_descriptor(0x02, 0x10, &["jpn", "eng"]);
+        assert_eq!(Eit::parse(&eit_section(1024, 1, &descriptor)), None);
+    }
+
+    #[test]
+    fn a_schedule_table_is_not_read() {
+        // 0x50 carries the next week of programmes; none of them is this one.
+        let descriptor = audio_descriptor(0x02, 0x10, &["jpn", "eng"]);
+        let mut schedule = eit_section(1024, 0, &descriptor);
+        schedule[0] = 0x50;
+        assert_eq!(Eit::parse(&schedule), None);
+    }
+
+    #[test]
+    fn a_programme_with_two_audio_streams_lists_both() {
+        let mut descriptors = audio_descriptor(0x01, 0x10, &["jpn"]);
+        descriptors.extend_from_slice(&audio_descriptor(0x01, 0x11, &["eng"]));
+        let eit = Eit::parse(&eit_section(1024, 0, &descriptors)).expect("eit");
+
+        assert_eq!(eit.audio.len(), 2);
+        assert_eq!(eit.audio[0].component_tag, 0x10);
+        assert_eq!(eit.audio[1].component_tag, 0x11);
+    }
+
+    #[test]
+    fn a_truncated_or_mislabelled_audio_descriptor_is_ignored() {
+        // Too short to hold a language code.
+        assert_eq!(parse_audio_component(&[0x02, 0x02, 0x10, 0x0F]), None);
+        // stream_content says video, so component_type means something else
+        // entirely and reading it as a channel arrangement would be wrong.
+        let mut video = audio_descriptor(0x02, 0x10, &["jpn"]);
+        video[2] = 0x01;
+        assert_eq!(parse_audio_component(&video[2..]), None);
+    }
+
+    #[test]
+    fn a_blank_language_code_is_treated_as_absent() {
+        // Broadcast pads an unused code rather than omitting it.
+        assert_eq!(language_code(Some(b"jpn")).as_deref(), Some("jpn"));
+        assert_eq!(language_code(Some(b"   ")), None);
+        assert_eq!(language_code(Some(&[0, 0, 0])), None);
+        assert_eq!(language_code(None), None);
     }
 
     #[test]

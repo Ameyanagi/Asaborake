@@ -65,6 +65,10 @@ function Source({ source }: { source: Diagnostics }) {
           {source.audio.length === 0
             ? "no audio stream"
             : source.audio.join(" · ")}
+          {source.dual_mono &&
+            `, bilingual (${source.dual_mono.main ?? "unknown"} and ${
+              source.dual_mono.sub ?? "unknown"
+            })`}
         </dd>
 
         <dt className="text-ink-faint">Captions</dt>
@@ -321,13 +325,13 @@ export function JobDetail() {
                   })}
                 </span>
                 <span
-                  className={
+                  className={`whitespace-pre-wrap ${
                     event.level === "error"
                       ? "text-alert"
                       : event.level === "warn"
                         ? "text-programme"
                         : "text-ink-dim"
-                  }
+                  }`}
                 >
                   {event.message}
                 </span>

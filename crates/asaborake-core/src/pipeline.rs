@@ -237,6 +237,7 @@ pub fn run(
             keep: &plan.keep,
             chapters: &chapters,
             probe: &probe,
+            dual_mono: diagnostics.as_ref().and_then(|d| d.dual_mono.as_ref()),
         },
         &mut |fraction| {
             on_progress(PipelineProgress {
@@ -451,6 +452,7 @@ mod tests {
             scrambled_packets: 900_000,
             error_packets: 0,
             total_packets: 1_000_000,
+            dual_mono: None,
             warnings: Vec::new(),
         };
 
