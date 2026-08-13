@@ -32,14 +32,33 @@ jobs:
   web:
     name: Web
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
     steps:
       - uses: actions/checkout@v5
+
+      # The web app lands after the engine, so this job has to stay green on a
+      # tree that does not contain it yet.
+      - id: probe
+        run: |
+          if [ -f web/package.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::web/ is not present yet; skipping web checks"
+          fi
+
       - uses: oven-sh/setup-bun@v2
+        if: steps.probe.outputs.present == 'true'
         with:
           bun-version: latest
-      - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun run lint
+
+      - if: steps.probe.outputs.present == 'true'
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - if: steps.probe.outputs.present == 'true'
+        working-directory: web
+        run: bun run typecheck
+
+      - if: steps.probe.outputs.present == 'true'
+        working-directory: web
+        run: bun run lint
