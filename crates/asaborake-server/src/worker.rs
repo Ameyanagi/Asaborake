@@ -154,6 +154,11 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
         return Ok(());
     };
 
+    if let Some(message) = no_room_for(&job) {
+        fail(context, &job, &message).await;
+        return Ok(());
+    }
+
     let mut request = JobRequest::new(&job.input, &job.output, profile);
     request.channel_id.clone_from(&job.channel_id);
     request.channel_name.clone_from(&job.channel_name);
@@ -205,6 +210,24 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
         return Ok(());
     }
 
+    record(context, &job, outcome).await?;
+
+    publish(context, &job.id).await;
+    Ok(())
+}
+
+/// Record what became of a job.
+///
+/// Split out because the outcomes are the interesting part and were buried at
+/// the end of a function that mostly sets a job up.
+async fn record(
+    context: &Context,
+    job: &Job,
+    outcome: Result<
+        Result<asaborake_core::JobOutcome, asaborake_core::Error>,
+        tokio::task::JoinError,
+    >,
+) -> Result<(), Error> {
     match outcome {
         Ok(Ok(result)) => {
             let analysis = serde_json::to_string(&result.analysis).ok();
@@ -254,14 +277,29 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
                 .await;
             log(context, &job.id, "warn", &message).await;
         }
-        Ok(Err(error)) => fail(context, &job, &explain(&error)).await,
+        Ok(Err(error)) => fail(context, job, &explain(&error)).await,
         // The blocking task itself failed, which means a panic in the
         // pipeline. That is a defect, and the job must not look successful.
-        Err(error) => fail(context, &job, &format!("worker stopped: {error}")).await,
+        Err(error) => fail(context, job, &format!("worker stopped: {error}")).await,
     }
 
-    publish(context, &job.id).await;
     Ok(())
+}
+
+/// Why this job cannot start for lack of disk, if that is the case.
+///
+/// An encode that runs out of room half way through has cost an hour of GPU
+/// time and leaves a truncated file that looks real until somebody plays it.
+fn no_room_for(job: &Job) -> Option<String> {
+    let short = crate::disk::shortfall(
+        std::path::Path::new(&job.input),
+        std::path::Path::new(&job.output),
+    )?;
+    Some(format!(
+        "not enough room where the output goes — about {} short of what this \
+         recording is likely to need",
+        crate::disk::describe(short)
+    ))
 }
 
 /// Render an error together with everything underneath it.

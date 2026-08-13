@@ -11,6 +11,7 @@
 
 pub mod api;
 pub mod db;
+pub mod disk;
 pub mod sources;
 pub mod worker;
 

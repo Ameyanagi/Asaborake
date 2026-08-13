@@ -147,8 +147,11 @@ or so, M a few days, L a week or more.
 12. **Run-hours schedule and finish action.** Encode only at night; sleep or
     shut down when the queue empties. **M**
 13. **Output naming from metadata**, genre folders, duplicate handling. **M**
-14. **Source housekeeping** — move to `succeeded/`/`failed/`, suppress
-    duplicate submissions, check free space before starting. **S**
+14. **Source housekeeping.** Duplicate submissions and the free-space check
+    are ~~done~~: the same recording to the same output returns the job already
+    queued, and a job that could not fit is refused before it starts rather
+    than discovered part way through. Moving sources to `succeeded/`/`failed/`
+    is still missing. **S**
 
 ### Stage 4 — make the UI a console
 

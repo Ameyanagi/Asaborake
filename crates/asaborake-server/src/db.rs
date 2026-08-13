@@ -186,6 +186,18 @@ impl Store {
     /// # Errors
     /// Returns [`Error::Database`] if the insert fails.
     pub async fn submit(&self, request: &NewJob) -> Result<String, Error> {
+        // The same recording to the same output submitted twice — EPGStation
+        // retrying, or somebody queueing from the browser what is already
+        // queued — should not become two jobs racing to write one file.
+        if let Some(existing) = self.unfinished_for(&request.input, &request.output).await? {
+            tracing::info!(
+                input = %request.input,
+                job = %existing,
+                "already queued; not submitting it again"
+            );
+            return Ok(existing);
+        }
+
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO jobs (id, input, output, profile, title, channel_id, channel_name,
@@ -205,6 +217,31 @@ impl Store {
         .await
         .map_err(Error::Database)?;
         Ok(id)
+    }
+
+    /// The job already queued or running for this exact piece of work.
+    ///
+    /// Keyed on the output as well as the input, because transcoding one
+    /// recording twice to *different* files is a legitimate thing to ask for —
+    /// a second profile, or a retry to somewhere with room. It is only the
+    /// same input going to the same output that would have two workers racing
+    /// to write one file.
+    ///
+    /// # Errors
+    /// Returns [`Error::Database`] if the query fails.
+    pub async fn unfinished_for(&self, input: &str, output: &str) -> Result<Option<String>, Error> {
+        let row = sqlx::query(
+            "SELECT id FROM jobs
+             WHERE input = ? AND output = ? AND status IN ('queued', 'running')
+             ORDER BY created_at
+             LIMIT 1",
+        )
+        .bind(input)
+        .bind(output)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::Database)?;
+        Ok(row.and_then(|row| row.try_get("id").ok()))
     }
 
     /// Claim the next job for a worker, marking it running.
@@ -654,6 +691,39 @@ mod tests {
         assert_eq!(found.status, JobStatus::Failed);
         assert!((found.progress - 0.3).abs() < 1e-9, "progress must be kept");
         assert_eq!(found.error.as_deref(), Some("ffmpeg exited 1"));
+    }
+
+    #[tokio::test]
+    async fn the_same_recording_submitted_twice_is_one_job() {
+        // EPGStation retrying, or somebody queueing from the browser what is
+        // already queued. Two jobs would race to write the same output file.
+        let (store, _dir) = store().await;
+        let first = store.submit(&job("show.ts")).await.expect("submits");
+        let again = store.submit(&job("show.ts")).await.expect("submits");
+        assert_eq!(first, again);
+        assert_eq!(store.list(10).await.expect("lists").len(), 1);
+
+        // A different recording is a different job.
+        let other = store.submit(&job("other.ts")).await.expect("submits");
+        assert_ne!(other, first);
+
+        // And so is the same recording going somewhere else, which is how a
+        // second profile or a retry to a disk with room gets queued.
+        let elsewhere = NewJob {
+            output: "/elsewhere/show.mp4".to_owned(),
+            ..job("show.ts")
+        };
+        assert_ne!(store.submit(&elsewhere).await.expect("submits"), first);
+
+        // And once the first has finished, the recording can be queued again —
+        // re-running something deliberately must still work.
+        store.claim_next().await.expect("claims");
+        store
+            .finish(&first, JobStatus::Completed, None, None, None)
+            .await
+            .expect("finishes");
+        let third = store.submit(&job("show.ts")).await.expect("submits");
+        assert_ne!(third, first);
     }
 
     #[tokio::test]
