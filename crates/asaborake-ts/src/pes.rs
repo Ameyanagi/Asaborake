@@ -1,0 +1,204 @@
+//! PES header parsing, for the presentation timestamps that anchor everything
+//! downstream: cut points, chapter positions and audio/video sync.
+
+/// The 90 kHz clock PTS and DTS are expressed in.
+pub const PTS_CLOCK_HZ: u64 = 90_000;
+
+/// PTS and DTS are 33-bit and wrap roughly every 26.5 hours.
+pub const PTS_MODULO: u64 = 1 << 33;
+
+/// The parts of a PES header Asaborake acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PesHeader {
+    /// Which elementary stream this packet belongs to.
+    pub stream_id: u8,
+    /// Presentation timestamp in 90 kHz units, when signalled.
+    pub pts: Option<u64>,
+    /// Decode timestamp in 90 kHz units, when signalled.
+    pub dts: Option<u64>,
+    /// Offset of the elementary-stream bytes within the PES packet.
+    pub payload_offset: usize,
+}
+
+impl PesHeader {
+    /// Parse the header at the start of a PES packet.
+    ///
+    /// Returns `None` for anything that is not a PES packet, including the
+    /// padding and private streams that carry no timestamps worth having.
+    #[must_use]
+    pub fn parse(buf: &[u8]) -> Option<Self> {
+        // packet_start_code_prefix is a fixed 0x000001.
+        if buf.len() < 9 || buf[0] != 0x00 || buf[1] != 0x00 || buf[2] != 0x01 {
+            return None;
+        }
+        let stream_id = buf[3];
+
+        // Padding, and a handful of system streams, have no optional header.
+        if matches!(stream_id, 0xBC | 0xBE | 0xBF | 0xF0..=0xF2 | 0xF8 | 0xFF) {
+            return Some(Self {
+                stream_id,
+                pts: None,
+                dts: None,
+                payload_offset: 6,
+            });
+        }
+
+        let flags = buf[7];
+        let header_len = usize::from(buf[8]);
+        let payload_offset = 9 + header_len;
+        if payload_offset > buf.len() {
+            return None;
+        }
+
+        let has_pts = flags & 0x80 != 0;
+        let has_dts = flags & 0x40 != 0;
+
+        let pts = if has_pts {
+            buf.get(9..14).map(read_timestamp)
+        } else {
+            None
+        };
+        let dts = if has_pts && has_dts {
+            buf.get(14..19).map(read_timestamp)
+        } else {
+            None
+        };
+
+        Some(Self {
+            stream_id,
+            pts,
+            dts,
+            payload_offset,
+        })
+    }
+}
+
+/// Decode the 5-byte marker-interleaved 33-bit timestamp encoding.
+fn read_timestamp(b: &[u8]) -> u64 {
+    (u64::from(b[0] & 0x0E) << 29)
+        | (u64::from(b[1]) << 22)
+        | (u64::from(b[2] & 0xFE) << 14)
+        | (u64::from(b[3]) << 7)
+        | (u64::from(b[4]) >> 1)
+}
+
+/// Accumulates 33-bit timestamps into a monotonic timeline.
+///
+/// A recording longer than ~26.5 hours wraps, and broadcast occasionally
+/// restarts the timebase outright. Both look like a huge backwards jump, so
+/// they are handled the same way: unwrap small backwards steps, and rebase on
+/// anything too large to be a wrap.
+#[derive(Debug, Default)]
+pub struct PtsUnwrapper {
+    last: Option<u64>,
+    offset: u64,
+    /// Accumulated correction applied when the timebase was reset outright.
+    rebase: i64,
+}
+
+impl PtsUnwrapper {
+    /// Create a fresh unwrapper.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed a raw 33-bit timestamp; returns it on a continuous timeline.
+    pub fn push(&mut self, pts: u64) -> i64 {
+        let Some(last) = self.last else {
+            self.last = Some(pts);
+            return pts as i64;
+        };
+
+        // Half the modulo is the classic wrap threshold: anything further
+        // backwards than that is more plausibly a wrap than a real rewind.
+        let half = PTS_MODULO / 2;
+        if last > pts && last - pts > half {
+            self.offset += PTS_MODULO;
+        } else if pts > last && pts - last > half {
+            // A large forward jump means the encoder restarted its clock;
+            // rebase so downstream timing stays continuous.
+            self.rebase -= (pts - last) as i64;
+        }
+
+        self.last = Some(pts);
+        (pts + self.offset) as i64 + self.rebase
+    }
+
+    /// Convert an unwrapped 90 kHz timestamp to seconds.
+    #[must_use]
+    pub fn to_seconds(ticks: i64) -> f64 {
+        ticks as f64 / PTS_CLOCK_HZ as f64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode_timestamp(prefix: u8, value: u64) -> [u8; 5] {
+        [
+            (prefix << 4) | (((value >> 29) as u8) & 0x0E) | 0x01,
+            ((value >> 22) & 0xFF) as u8,
+            ((((value >> 14) as u8) & 0xFE) | 0x01),
+            ((value >> 7) & 0xFF) as u8,
+            ((((value << 1) as u8) & 0xFE) | 0x01),
+        ]
+    }
+
+    #[test]
+    fn parses_pts_only_header() {
+        let pts = 123_456_789u64;
+        let mut buf = vec![0x00, 0x00, 0x01, 0xE0, 0x00, 0x00, 0x80, 0x80, 5];
+        buf.extend_from_slice(&encode_timestamp(0b0010, pts));
+        buf.extend_from_slice(&[0xAA, 0xBB]);
+
+        let header = PesHeader::parse(&buf).expect("pes header");
+        assert_eq!(header.stream_id, 0xE0);
+        assert_eq!(header.pts, Some(pts));
+        assert_eq!(header.dts, None);
+        assert_eq!(header.payload_offset, 14);
+    }
+
+    #[test]
+    fn parses_pts_and_dts_header() {
+        let (pts, dts) = (900_000u64, 897_000u64);
+        let mut buf = vec![0x00, 0x00, 0x01, 0xE0, 0x00, 0x00, 0x80, 0xC0, 10];
+        buf.extend_from_slice(&encode_timestamp(0b0011, pts));
+        buf.extend_from_slice(&encode_timestamp(0b0001, dts));
+
+        let header = PesHeader::parse(&buf).expect("pes header");
+        assert_eq!(header.pts, Some(pts));
+        assert_eq!(header.dts, Some(dts));
+    }
+
+    #[test]
+    fn rejects_non_pes_payload() {
+        assert!(PesHeader::parse(&[0xFF; 16]).is_none());
+    }
+
+    #[test]
+    fn unwraps_across_the_33_bit_boundary() {
+        let mut unwrapper = PtsUnwrapper::new();
+        let before = PTS_MODULO - 90_000;
+        assert_eq!(unwrapper.push(before), before as i64);
+        // One second later, having wrapped through zero.
+        let after = unwrapper.push(0);
+        assert_eq!(after, PTS_MODULO as i64);
+        assert!((PtsUnwrapper::to_seconds(after - before as i64) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rebases_when_the_encoder_clock_restarts() {
+        let mut unwrapper = PtsUnwrapper::new();
+        let start = 1_000_000u64;
+        let a = unwrapper.push(start);
+        let b = unwrapper.push(start + 90_000);
+        assert_eq!(b - a, 90_000);
+
+        // A jump forwards of many hours is a timebase reset, not real elapsed
+        // time; the timeline must not gain those hours.
+        let c = unwrapper.push(start + 90_000 + PTS_MODULO / 2 + 90_000);
+        assert!(c - b < 90_000 * 10, "reset should not add hours: {}", c - b);
+    }
+}

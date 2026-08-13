@@ -1,0 +1,30 @@
+/target
+**/*.rs.bk
+
+# Upstream projects cloned for behavioural reference only. Not redistributed:
+# see ATTRIBUTION.md for the clone commands.
+/reference/
+
+# Bun / TanStack Start
+node_modules/
+.output/
+.nitro/
+.tanstack/
+.vinxi/
+dist/
+*.tsbuildinfo
+
+# Runtime state
+/data/
+*.db
+*.db-wal
+*.db-shm
+*.abl
+*.log
+
+# Generated test material
+/testdata/generated/
+
+.DS_Store
+.env
+.env.local
