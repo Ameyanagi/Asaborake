@@ -97,6 +97,14 @@ pub fn detect_layout(buf: &[u8]) -> Result<(PacketLayout, usize), Error> {
 }
 
 /// One parsed 188-byte transport packet, borrowing from the read buffer.
+///
+/// The flags are independent single-bit fields defined by ISO 13818-1, not a
+/// state machine; grouping them into enums would obscure the mapping back to
+/// the specification without making any illegal combination unrepresentable.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the packet header's independent flag bits"
+)]
 #[derive(Debug, Clone, Copy)]
 pub struct TsPacket<'a> {
     /// Packet identifier: which elementary or table stream this belongs to.
@@ -182,7 +190,7 @@ impl<'a> TsPacket<'a> {
     }
 
     /// Whether the payload is scrambled, which for a recording means the card
-    /// or SoftCAS failed to decrypt this section.
+    /// or `SoftCAS` failed to decrypt this section.
     #[must_use]
     pub const fn is_scrambled(&self) -> bool {
         self.scrambling_control != 0

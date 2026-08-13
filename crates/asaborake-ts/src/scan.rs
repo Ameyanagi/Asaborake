@@ -120,7 +120,7 @@ pub struct TsInfo {
 impl TsInfo {
     /// The program Asaborake should operate on.
     ///
-    /// A recording made by EPGStation contains a single service, but a raw
+    /// A recording made by `EPGStation` contains a single service, but a raw
     /// full-transponder capture can carry several. Preferring the program with
     /// a video stream, then the lowest program number, picks the main service
     /// rather than a data or radio sub-channel.
@@ -184,21 +184,18 @@ pub fn scan<R: Read>(mut reader: R, file_size: u64) -> Result<TsInfo, Error> {
         let mut consumed = 0usize;
         while consumed + stride <= buffer.len() {
             let raw = &buffer[consumed + sync..consumed + sync + 188];
-            match TsPacket::parse(raw) {
-                Some(packet) => {
-                    state.push(&packet);
-                    consumed += stride;
-                }
-                None => {
-                    // Lost alignment. Step one byte and let the next iteration
-                    // re-find the sync byte rather than discarding the rest.
-                    state.stats.corrupt_packets += 1;
-                    consumed += 1;
-                    if let Some(offset) = resync(&buffer[consumed..], layout) {
-                        consumed += offset;
-                    } else {
-                        break;
-                    }
+            if let Some(packet) = TsPacket::parse(raw) {
+                state.push(&packet);
+                consumed += stride;
+            } else {
+                // Lost alignment. Step one byte and let the next iteration
+                // re-find the sync byte rather than discarding the rest.
+                state.stats.corrupt_packets += 1;
+                consumed += 1;
+                if let Some(offset) = resync(&buffer[consumed..], layout) {
+                    consumed += offset;
+                } else {
+                    break;
                 }
             }
         }
@@ -233,9 +230,9 @@ struct ScanState {
 
     pat_assembler: SectionAssembler,
     pmt_assemblers: HashMap<u16, SectionAssembler>,
-    /// program_number -> pmt_pid, from the PAT.
+    /// `program_number` -> `pmt_pid`, from the PAT.
     pat: BTreeMap<u16, u16>,
-    /// pmt_pid -> parsed PMT.
+    /// `pmt_pid` -> parsed PMT.
     pmts: BTreeMap<u16, Pmt>,
 
     video_pid: Option<u16>,

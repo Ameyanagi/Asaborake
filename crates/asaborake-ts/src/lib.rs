@@ -22,7 +22,9 @@
 //! # }
 //! ```
 
-#![warn(missing_docs)]
+// Tests assert; asserting is how they fail. The workspace bans panicking
+// constructs in shipping code, not in the suite that checks it.
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic))]
 
 pub mod packet;
 pub mod pes;

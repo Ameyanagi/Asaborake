@@ -50,14 +50,37 @@ approx = "0.5.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
-# The analysis code is inherently arithmetic-heavy; these lints fire constantly
-# on correct signal-processing code without catching real defects.
+pedantic = { level = "deny", priority = -1 }
+# Fallible conversions and panics are worth being explicit about in a pipeline
+# that runs unattended overnight against whatever the tuner produced.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+# The bitstream parsers index deliberately, immediately after an explicit
+# length check; `.get()` on every one of those would obscure the logic rather
+# than protect it.
+indexing_slicing = "allow"
+
+# The signal-processing code converts between integer sample types and f64
+# constantly. These fire on every such conversion without distinguishing the
+# correct ones from the lossy ones, so they are handled by review instead.
 cast_precision_loss = "allow"
 cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
+# Asaborake's public types are plain data crossing a JSON boundary; requiring
+# every field to be documented is useful, requiring `# Errors` prose on every
+# `Result`-returning private helper is not.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# Struct-per-argument refactors do not make an ffmpeg command builder clearer.
+too_many_arguments = "allow"
+module_name_repetitions = "allow"
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#
+# Asaborake pre-commit hook.
+#
+# Enable it once per clone with:
+#     git config core.hooksPath .githooks
+# or run `make hooks`, which does the same thing.
+#
+# The checks here are exactly what CI runs, so a commit that passes locally
+# does not fail in CI for a formatting or lint reason.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+fail() {
+    echo "pre-commit: $1" >&2
+    echo "pre-commit: commit aborted. Fix the above, or pass --no-verify to skip." >&2
+    exit 1
+}
+
+staged_rust=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs' 'Cargo.toml' 'Cargo.lock' 'crates/**/Cargo.toml')
+staged_web=$(git diff --cached --name-only --diff-filter=ACMR -- 'web/**')
+
+if [ -n "$staged_rust" ]; then
+    echo "pre-commit: cargo fmt --check"
+    cargo fmt --all --check || fail "rustfmt found unformatted code; run 'cargo fmt --all'"
+
+    echo "pre-commit: cargo clippy"
+    cargo clippy --workspace --all-targets --all-features -- -D warnings \
+        || fail "clippy found problems"
+
+    echo "pre-commit: cargo test"
+    cargo test --workspace --all-features --quiet || fail "tests failed"
+fi
+
+if [ -n "$staged_web" ] && [ -d web/node_modules ]; then
+    echo "pre-commit: bun typecheck + lint"
+    (cd web && bun run typecheck) || fail "TypeScript type errors"
+    (cd web && bun run lint) || fail "web lint failed"
+fi
+
+echo "pre-commit: ok"

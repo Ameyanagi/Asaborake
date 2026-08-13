@@ -39,7 +39,7 @@ impl VideoFormat {
     }
 }
 
-/// MPEG-2 frame_rate_code to an exact rational, as specified in 13818-2.
+/// MPEG-2 `frame_rate_code` to an exact rational, as specified in 13818-2.
 const MPEG2_FRAME_RATES: [(u32, u32); 9] = [
     (0, 1), // forbidden
     (24000, 1001),
@@ -72,9 +72,7 @@ pub fn parse_mpeg2_sequence_header(data: &[u8]) -> Option<VideoFormat> {
 
     // progressive_sequence lives in the sequence extension (start code 0xB5,
     // extension id 0x1). Its absence means MPEG-1 semantics: progressive.
-    let interlaced = find_sequence_extension(data)
-        .map(|ext| ext & 0x08 == 0)
-        .unwrap_or(false);
+    let interlaced = find_sequence_extension(data).is_some_and(|ext| ext & 0x08 == 0);
 
     Some(VideoFormat {
         width,
@@ -180,10 +178,9 @@ pub fn parse_h264_sps(data: &[u8]) -> Option<VideoFormat> {
     // Crop offsets are expressed in chroma samples, so their pixel weight
     // depends on the subsampling in use.
     let (sub_width, sub_height) = match chroma_format_idc {
-        0 => (1, 1), // monochrome
-        3 => (1, 1), // 4:4:4
-        2 => (2, 1), // 4:2:2
-        _ => (2, 2), // 4:2:0
+        0 | 3 => (1, 1), // monochrome and 4:4:4 are unsubsampled
+        2 => (2, 1),     // 4:2:2
+        _ => (2, 2),     // 4:2:0
     };
     let crop_unit_x = sub_width;
     let crop_unit_y = sub_height * (2 - u32::from(frame_mbs_only == 1));
@@ -365,12 +362,18 @@ impl<'a> BitReader<'a> {
     }
 
     fn signed_exp_golomb(&mut self) -> Option<i32> {
-        let value = self.unsigned_exp_golomb()?;
-        Some(if value % 2 == 0 {
-            -((value / 2) as i32)
+        // The unsigned code can reach 2^32-1, so the mapping is done in i64
+        // and only then narrowed; a value that does not fit means the buffer
+        // is not a valid parameter set.
+        let value = i64::from(self.unsigned_exp_golomb()?);
+        // The standard mapping: even codes are negative, odd codes positive.
+        // `value` is non-negative here, so `(value + 1) / 2` is exact.
+        let signed = if value % 2 == 0 {
+            -(value / 2)
         } else {
-            value.div_ceil(2) as i32
-        })
+            (value + 1) / 2
+        };
+        i32::try_from(signed).ok()
     }
 }
 

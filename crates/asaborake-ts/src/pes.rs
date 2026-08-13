@@ -50,15 +50,18 @@ impl PesHeader {
             return None;
         }
 
-        let has_pts = flags & 0x80 != 0;
-        let has_dts = flags & 0x40 != 0;
+        // The two flags are only meaningful together: DTS without PTS is not a
+        // legal combination, and streams that signal it are treated as having
+        // neither rather than trusting a malformed header.
+        let presentation_signalled = flags & 0x80 != 0;
+        let decode_signalled = flags & 0x40 != 0;
 
-        let pts = if has_pts {
+        let pts = if presentation_signalled {
             buf.get(9..14).map(read_timestamp)
         } else {
             None
         };
-        let dts = if has_pts && has_dts {
+        let dts = if presentation_signalled && decode_signalled {
             buf.get(14..19).map(read_timestamp)
         } else {
             None
@@ -90,10 +93,20 @@ fn read_timestamp(b: &[u8]) -> u64 {
 /// anything too large to be a wrap.
 #[derive(Debug, Default)]
 pub struct PtsUnwrapper {
-    last: Option<u64>,
-    offset: u64,
+    last: Option<i64>,
+    /// Accumulated `PTS_MODULO` steps added back after each wrap.
+    offset: i64,
     /// Accumulated correction applied when the timebase was reset outright.
     rebase: i64,
+}
+
+/// A 33-bit timestamp masked into range, as a signed tick count.
+///
+/// Masking makes the conversion total: the result is below 2^33, so it always
+/// fits in `i64` and the whole unwrapper can work in signed arithmetic without
+/// a single lossy cast.
+fn masked(pts: u64) -> i64 {
+    i64::try_from(pts & (PTS_MODULO - 1)).unwrap_or(0)
 }
 
 impl PtsUnwrapper {
@@ -105,24 +118,27 @@ impl PtsUnwrapper {
 
     /// Feed a raw 33-bit timestamp; returns it on a continuous timeline.
     pub fn push(&mut self, pts: u64) -> i64 {
+        let pts = masked(pts);
         let Some(last) = self.last else {
             self.last = Some(pts);
-            return pts as i64;
+            return pts;
         };
 
-        // Half the modulo is the classic wrap threshold: anything further
+        // Half the modulo is the classic wrap threshold: a step further
         // backwards than that is more plausibly a wrap than a real rewind.
-        let half = PTS_MODULO / 2;
-        if last > pts && last - pts > half {
-            self.offset += PTS_MODULO;
-        } else if pts > last && pts - last > half {
-            // A large forward jump means the encoder restarted its clock;
-            // rebase so downstream timing stays continuous.
-            self.rebase -= (pts - last) as i64;
+        let half = MODULO_TICKS / 2;
+        let delta = pts - last;
+        if delta < -half {
+            self.offset += MODULO_TICKS;
+        } else if delta > half {
+            // A jump forwards this large means the encoder restarted its
+            // clock; rebase so downstream timing stays continuous rather than
+            // gaining hours that were never recorded.
+            self.rebase -= delta;
         }
 
         self.last = Some(pts);
-        (pts + self.offset) as i64 + self.rebase
+        pts + self.offset + self.rebase
     }
 
     /// Convert an unwrapped 90 kHz timestamp to seconds.
@@ -131,6 +147,9 @@ impl PtsUnwrapper {
         ticks as f64 / PTS_CLOCK_HZ as f64
     }
 }
+
+/// [`PTS_MODULO`] as signed ticks, for the unwrapper's arithmetic.
+const MODULO_TICKS: i64 = 1 << 33;
 
 #[cfg(test)]
 mod tests {
@@ -181,11 +200,12 @@ mod tests {
     fn unwraps_across_the_33_bit_boundary() {
         let mut unwrapper = PtsUnwrapper::new();
         let before = PTS_MODULO - 90_000;
-        assert_eq!(unwrapper.push(before), before as i64);
+        let before_ticks = MODULO_TICKS - 90_000;
+        assert_eq!(unwrapper.push(before), before_ticks);
         // One second later, having wrapped through zero.
         let after = unwrapper.push(0);
-        assert_eq!(after, PTS_MODULO as i64);
-        assert!((PtsUnwrapper::to_seconds(after - before as i64) - 1.0).abs() < 1e-9);
+        assert_eq!(after, MODULO_TICKS);
+        assert!((PtsUnwrapper::to_seconds(after - before_ticks) - 1.0).abs() < 1e-9);
     }
 
     #[test]
