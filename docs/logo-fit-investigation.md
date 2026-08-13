@@ -72,18 +72,64 @@ makes `GetLogo` return `nullptr` for the *whole* logo. It refuses rather than
 quietly producing a logo of nothing — which is why the failure is visible there
 and invisible here.
 
+## Fixed so far, and what it did not fix
+
+Two real defects were found and fixed, with regression tests:
+
+- **The reverse fit was used without inverting it.** When only one of the two
+  regressions succeeded, the code took whichever one it had. The forward fit is
+  the slope of background against observed, which is what the model wants; the
+  reverse is its reciprocal. For a pixel the logo covers completely it is the
+  *forward* fit that degenerates, so every opaque pixel took the reverse branch
+  and arrived as a slope near zero — read as "no logo".
+- **The degeneracy test was absolute where it had to be relative.** `fit_line`
+  rejected a fit when `n·Σx² − (Σx)²` fell below `1e-12`. That difference is
+  two large nearly-equal numbers when x barely moves, so for a constant pixel it
+  cancelled to floating-point residue *above* the floor and returned a
+  meaningless slope instead of refusing.
+
+A synthetic opaque logo now recovers at opacity 0.98 where it previously came
+back as nothing, and a nearly-opaque one keeps most of its pixels.
+
+**It changed nothing on real broadcast** — the L字 banner still fits at
+0.0003961112815886736, identical to sixteen digits. That is informative rather
+than disappointing: on real material every pixel carries compression noise, so
+the forward fit never degenerates and neither fixed path is reached. The
+failure there is in the *combined* branch, which was not changed:
+
+```rust
+(Some((a1, b1)), Some((a2, b2))) if a2.abs() > 1e-9 => {
+    (f64::midpoint(a1, 1.0 / a2), f64::midpoint(b1, -b2 / a2))
+}
+```
+
+For an opaque pixel with noise, the observed value is a constant plus noise
+that is uncorrelated with the background. So `a1 = cov(F,B)/var(F)` is a small
+number divided by a small number — near zero, with a *sign set by noise* — and
+`1/a2` is enormous with the same arbitrary sign. Averaging them gives a large
+value of random sign, and every pixel that lands negative is below one and gets
+neutralised. That would leave exactly what is observed: no pixel anywhere above
+the bar.
+
+Amatsukaze has the same expression, so the difference is upstream of it — most
+likely in how much the background actually varies *per pixel* across the
+accepted frames, or in the missing chroma planes, which give two more
+regressions to disagree with a noisy luma one.
+
 ## Where to start
 
-1. Fix `canonicalise` to distinguish the two cases it currently merges: a slope
-   at or above one that is merely extreme means *opaque*, and should clamp to
-   full opacity; a slope genuinely below one, or a fit that never converged,
-   means no logo. Only the second should be neutralised.
-2. Then unit-test `LogoScanner` end to end against a synthetic case with a
-   *known* alpha, including α near 1.0: composite a known logo over synthetic
-   backgrounds spanning the range, accumulate, fit, and assert the recovered
-   alpha. The model's algebra has such a test; the scanner's accumulation and
-   fit together do not, which is exactly the gap the defect lives in.
-3. Re-run the five rectangles in the table above. The L字 banner is the
+1. Instrument the combined branch for a handful of known-opaque pixels on the
+   real recording: print `a1`, `a2`, `var(F)`, `var(B)` and the count of frames
+   contributing. The hypothesis above predicts `var(F)` is tiny and the sign of
+   `a1` is arbitrary; confirm or kill that before changing anything.
+2. If confirmed, the fix is to refuse a pixel whose `var(F)` is negligible
+   compared to `var(B)` — that pixel is opaque by definition — and record it as
+   opaque rather than letting a noise-driven regression decide.
+3. Then port the chroma planes. Amatsukaze fits Y, U *and* V and requires all
+   three to succeed, which is three independent votes where Asaborake has one.
+   That is the remaining structural divergence and it is likely to matter most
+   exactly here, on a grey logo whose luma barely moves.
+4. Re-run the five rectangles in the table above. The L字 banner is the
    assertion that matters — it should come back near 1.0.
 
 ## The other divergence from the reference

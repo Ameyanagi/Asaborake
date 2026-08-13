@@ -47,6 +47,14 @@ const MAGIC: &[u8; 4] = b"ABL1";
 /// rather than guessed about.
 pub const STRONG_ALPHA: f32 = 0.20;
 
+/// Largest slope kept, which is an opacity of 0.98.
+///
+/// Opacity is `1 - 1/A`, so a fully opaque pixel has an infinite `A`. Infinity
+/// is not something the model can store or the detector can correlate against,
+/// so it is clamped here — to the *opaque* end, which is where the measurement
+/// actually pointed.
+const MAXIMUM_SLOPE: f32 = 50.0;
+
 /// How many such pixels a real logo has.
 ///
 /// A logo is a few hundred solid pixels in a mostly empty rectangle, so this
@@ -193,10 +201,51 @@ impl LogoData {
     /// a strong synthetic edge that then dominates feature selection.
     ///
     /// Anything outside the physical range is rewritten as "no logo here".
-    pub fn canonicalise(&mut self) {
+    /// Neutralise coefficients a stored file should never have contained.
+    ///
+    /// Distinct from [`canonicalise`](Self::canonicalise) on purpose. During a
+    /// fit an infinite slope is a measurement of full opacity; in a file that
+    /// was written by something else it is corruption, and there is no frame
+    /// behind it to say otherwise.
+    pub fn scrub(&mut self) {
         for (a, b) in self.a.iter_mut().zip(self.b.iter_mut()) {
             if !a.is_finite() || !b.is_finite() || *a < 1.0 {
                 *a = 1.0;
+                *b = 0.0;
+            }
+        }
+    }
+
+    /// Put a freshly fitted map into a form the detector can use.
+    ///
+    /// Two different things arrive here looking alike, and telling them apart
+    /// is the whole job: a slope below one, or no slope at all, means there is
+    /// no logo at this pixel; a slope too large to store means the pixel is
+    /// opaque. Merging them recorded the second as the first.
+    pub fn canonicalise(&mut self) {
+        for (a, b) in self.a.iter_mut().zip(self.b.iter_mut()) {
+            // A slope below one cannot come from the compositing model, and a
+            // fit that produced no number never converged. Both mean there is
+            // no logo at this pixel.
+            if a.is_nan() || *a < 1.0 {
+                *a = 1.0;
+                *b = 0.0;
+                continue;
+            }
+            // An *opaque* pixel is the opposite case and used to be caught by
+            // the same test. Its observed value never moves however far the
+            // background behind it moves, so the reverse slope is zero, its
+            // reciprocal is infinite, and the fitted slope is infinite too.
+            // That is a measurement of full opacity, not a failure to measure,
+            // and rewriting it as "no logo" recorded the opposite of what the
+            // frames said — which is how a solid white-on-blue banner came
+            // back with an opacity of 0.0004.
+            if *a > MAXIMUM_SLOPE {
+                *a = MAXIMUM_SLOPE;
+            }
+            if !b.is_finite() {
+                // The intercept is meaningless once the pixel is opaque: the
+                // background no longer shows through it at all.
                 *b = 0.0;
             }
         }
@@ -317,8 +366,10 @@ impl LogoData {
         }
 
         // Non-finite coefficients would propagate a NaN into every frame score
-        // and silently disable detection for the whole recording.
-        logo.canonicalise();
+        // and silently disable detection for the whole recording. Scrubbed
+        // rather than canonicalised: in a file there are no frames behind an
+        // infinity to say it meant full opacity.
+        logo.scrub();
         Ok(logo)
     }
 

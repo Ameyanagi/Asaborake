@@ -79,8 +79,15 @@ fn fit_line(
     sum_squares: f64,
     sum_products: f64,
 ) -> Option<(f64, f64)> {
+    // The denominator is the spread of x, and it is a difference of two large
+    // nearly-equal numbers when x barely moves — so an absolute floor does not
+    // catch a degenerate fit. It has to be judged against the size of the terms
+    // it came from. A pixel a logo covers completely has exactly this shape:
+    // its value never moves, the difference cancels to floating-point residue,
+    // and an absolute test let that residue through as a meaningless slope near
+    // zero, which was then read as "no logo" for every opaque pixel.
     let denominator = n * sum_squares - sum_x * sum_x;
-    if denominator.abs() < 1e-12 {
+    if denominator.abs() <= 1e-9 * (n * sum_squares).abs().max(1.0) {
         return None;
     }
     let slope = (n * sum_products - sum_x * sum_y) / denominator;
@@ -326,20 +333,42 @@ impl LogoScanner {
                 (Some((a1, b1)), Some((a2, b2))) if a2.abs() > 1e-9 => {
                     (f64::midpoint(a1, 1.0 / a2), f64::midpoint(b1, -b2 / a2))
                 }
-                // One direction failing is normal for a pixel the logo does
-                // not cover; the other still describes it.
-                (Some(pair), _) | (_, Some(pair)) => pair,
+                // The forward fit is already the slope of background against
+                // observed, which is what the model wants.
+                (Some(pair), _) => pair,
+                // The reverse fit is the slope of observed against background,
+                // which is the *reciprocal*, and has to be inverted before it
+                // means the same thing. Using it as it stood was the bug: for a
+                // pixel the logo covers completely the observed value never
+                // moves, so it is the forward fit that degenerates and every
+                // opaque pixel took this branch — arriving as a slope of zero
+                // and being discarded as no logo at all.
+                (_, Some((a2, b2))) => {
+                    if a2.abs() > 1e-9 {
+                        (1.0 / a2, -b2 / a2)
+                    } else {
+                        // Perfectly opaque: infinite slope, no background
+                        // showing through. Clamped to the opaque end below.
+                        (f64::INFINITY, 0.0)
+                    }
+                }
                 (None, None) => (1.0, 0.0),
             };
 
-            if slope.is_finite() && intercept.is_finite() && slope.abs() > 1e-6 {
-                a.push(slope as f32);
-                b.push(intercept as f32);
-            } else {
+            if slope.is_nan() || intercept.is_nan() || slope.abs() <= 1e-6 {
                 // A pixel with no usable fit is treated as logo-free rather
                 // than poisoning the map with a NaN.
                 a.push(1.0);
                 b.push(0.0);
+            } else {
+                // An infinite slope means opaque and is kept; `canonicalise`
+                // clamps it to a number the detector can correlate against.
+                a.push(slope as f32);
+                b.push(if intercept.is_finite() {
+                    intercept as f32
+                } else {
+                    0.0
+                });
             }
         }
 
@@ -480,6 +509,56 @@ mod tests {
         let index = ((r.height / 2) * r.width + r.width / 2) as usize;
         assert_relative_eq!(logo.alpha_at(index), alpha, epsilon = 0.03);
         assert_relative_eq!(logo.colour_at(index), colour, epsilon = 0.05);
+    }
+
+    #[test]
+    fn recovers_an_opaque_logo_as_opaque_rather_than_as_nothing() {
+        // The case that was wrong on real broadcast. A pixel the logo covers
+        // completely never moves, however far the background behind it moves,
+        // so its fitted slope is infinite. That is a measurement of full
+        // opacity; it used to be discarded as a failed fit and rewritten as
+        // "no logo", which is the opposite reading. A solid white-on-blue
+        // emergency banner came back at an opacity of 0.0004.
+        let (alpha, colour) = (1.0f32, 0.85f32);
+        let scanner = scan_with(alpha, colour, 0, &[10, 60, 120, 200]);
+        assert!(scanner.frames_accepted() >= MINIMUM_FRAMES);
+
+        let logo = scanner
+            .finish("opaque".into(), None, (FRAME_W, FRAME_H))
+            .expect("an opaque logo is still a logo");
+
+        let r = rect();
+        let index = ((r.height / 2) * r.width + r.width / 2) as usize;
+        assert!(
+            logo.alpha_at(index) > 0.95,
+            "an opaque pixel came back at {}",
+            logo.alpha_at(index)
+        );
+        // And it must still look like a logo rather than being neutralised.
+        assert!(logo.is_plausible(), "opacity {}", logo.mean_alpha());
+    }
+
+    #[test]
+    fn a_nearly_opaque_logo_survives_the_noise_that_pushes_it_over() {
+        // Near opacity 1 the slope is large and unstable, so noise throws
+        // individual pixels past infinity. Every one of those used to be
+        // zeroed, which is why a strongly opaque logo lost most of itself.
+        let scanner = scan_with(0.95, 0.8, 2, &[10, 60, 120, 200]);
+        let logo = scanner
+            .finish("nearly".into(), None, (FRAME_W, FRAME_H))
+            .expect("a plausible logo");
+
+        let r = rect();
+        let interior: Vec<f32> = (1..r.height - 1)
+            .flat_map(|row| (1..r.width - 1).map(move |column| (row * r.width + column) as usize))
+            .map(|index| logo.alpha_at(index))
+            .collect();
+        let opaque = interior.iter().filter(|&&a| a > 0.5).count();
+        assert!(
+            opaque * 2 > interior.len(),
+            "only {opaque} of {} interior pixels came back opaque",
+            interior.len()
+        );
     }
 
     #[test]
