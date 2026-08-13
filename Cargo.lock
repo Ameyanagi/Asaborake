@@ -34,6 +34,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "asaborake-cmcut"
+version = "0.1.0"
+dependencies = [
+ "asaborake-analyze",
+ "serde",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "asaborake-media"
 version = "0.1.0"
 dependencies = [
