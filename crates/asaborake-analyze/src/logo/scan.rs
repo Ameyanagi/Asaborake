@@ -190,9 +190,24 @@ impl LogoScanner {
         }
 
         self.border.sort_unstable();
-        let lowest = *self.border.first()?;
-        let highest = *self.border.last()?;
-        if highest.saturating_sub(lowest) > self.flatness_threshold {
+
+        // Spread is measured between percentiles rather than between the
+        // extremes.
+        //
+        // A logo rectangle found automatically is not the tight box an
+        // operator would draw around the mark; it is the bounding box of
+        // everything steady near it, and on a real broadcast that can be a
+        // couple of hundred pixels a side. Judging such a border by its
+        // minimum and maximum means one bright pixel — the corner of a moving
+        // object, a caption edge, a compression artefact — disqualifies an
+        // otherwise perfectly flat frame. On a busy programme that rejects
+        // every frame, and the logo is never learned.
+        //
+        // The tenth and ninetieth percentiles tolerate that while still
+        // requiring the border to be genuinely one colour.
+        let low = percentile(&self.border, 0.10)?;
+        let high = percentile(&self.border, 0.90)?;
+        if high.saturating_sub(low) > self.flatness_threshold {
             return None;
         }
 
@@ -307,6 +322,15 @@ impl LogoScanner {
         }
         Some(logo)
     }
+}
+
+/// Value at a fraction of the way through a sorted slice.
+fn percentile(sorted: &[u8], fraction: f32) -> Option<u8> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let index = ((sorted.len() - 1) as f32 * fraction).round() as usize;
+    sorted.get(index.min(sorted.len() - 1)).copied()
 }
 
 /// Mean of the middle half of a sorted slice.
@@ -437,6 +461,42 @@ mod tests {
 
         // The rectangle's own border is background, never logo.
         assert_relative_eq!(logo.alpha_at(0), 0.0, epsilon = 0.02);
+    }
+
+    #[test]
+    fn a_few_stray_pixels_do_not_disqualify_a_flat_border() {
+        // A large auto-located rectangle's border crosses a lot of picture,
+        // and one bright intruder — the corner of a moving object, a caption
+        // edge — must not reject the frame. On a busy programme, judging by
+        // the extremes rejects every frame and the logo is never learned.
+        let mut scanner = LogoScanner::new(rect(), DEFAULT_FLATNESS_THRESHOLD);
+        let mut luma = synthetic_frame(80, 0.5, 0.9, 0);
+
+        let r = rect();
+        for offset in 0..3u32 {
+            let index = ((r.y * FRAME_W) + r.x + offset) as usize;
+            luma[index] = 255;
+        }
+
+        assert!(
+            scanner.add_frame(&frame(&luma)),
+            "a handful of outliers must not reject an otherwise flat border"
+        );
+    }
+
+    #[test]
+    fn a_genuinely_varied_border_is_still_rejected() {
+        // Tolerating outliers must not turn into tolerating a gradient.
+        let mut scanner = LogoScanner::new(rect(), DEFAULT_FLATNESS_THRESHOLD);
+        let mut luma = synthetic_frame(80, 0.5, 0.9, 0);
+
+        let r = rect();
+        for offset in 0..r.width {
+            let index = ((r.y * FRAME_W) + r.x + offset) as usize;
+            luma[index] = (offset * 8).min(255) as u8;
+        }
+
+        assert!(!scanner.add_frame(&frame(&luma)));
     }
 
     #[test]

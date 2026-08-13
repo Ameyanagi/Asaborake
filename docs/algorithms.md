@@ -187,6 +187,26 @@ recordings routinely start at an offset.
 
 ## Known limits
 
+- **Emergency overlays (L字).** When a broadcaster is running a weather or
+  earthquake warning, the picture is inset and a banner runs down one edge with
+  a ticker along the bottom. That banner is high-contrast, never moves, and is
+  present throughout — which is precisely the definition the locator uses, so
+  it wins over the real logo. Worse, its border crosses live picture, so the
+  flatness test never passes and no logo is fitted at all.
+
+  Observed on two of three Tokyo commercial channels during a 大雨特別警報.
+  Asaborake behaves safely — no logo means low confidence means the recording
+  is kept whole — but it spends three decoding passes discovering that. There
+  is no guard for it yet.
+
+- **Programme logos versus station logos.** The persistent corner mark on a
+  Japanese variety show is often the *programme's* logo rather than the
+  station's. It works just as well for detection — it is absent during
+  commercials either way — but the logo store is keyed by channel, so a
+  programme logo cached under a channel will not be found in the next
+  recording from it. The detector then reports no logo and the recording is
+  kept whole, which is safe but wasteful.
+
 - **HEVC geometry.** Format-change detection parses MPEG-2 sequence headers and
   H.264 SPS. A 4K HEVC service will not have its resolution changes noticed.
 - **Timestamp discontinuities.** A recording assembled from separately encoded
