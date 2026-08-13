@@ -98,13 +98,20 @@ or so, M a few days, L a week or more.
    stereo. The signal is the audio component descriptor, and it lives in the
    *event* table rather than the program map. Read from there, the stream is
    split into two mono tracks tagged with their own languages.
-3. **ARIB captions to SRT and ASS.** The largest single functional gap. Needs a
-   B24 decoder — either port one or shell out to an existing tool — plus
-   re-timing across cut points, which Asaborake is well placed to do because it
-   already maps source time to output time in `chapters.rs`. DRCS glyph
-   handling can come later; unmapped glyphs render as a placeholder. **L**
-4. **Split output on format change.** `asaborake-ts` already reports the change
-   points; act on them instead of logging them. **M**
+3. ~~**ARIB captions to SRT and ASS.**~~ **SRT done.** A B24 decoder was
+   written rather than shelled out to, and it needs no character table: ARIB's
+   kanji set is JIS X 0208 in EUC-JP's arrangement with the high bit clear.
+   Captions are re-timed through `chapters.rs` and written beside every
+   output. ASS is still missing, and with it the positioning and colour; so is
+   the superimpose stream that carries emergency crawls.
+4. ~~**Split output on format change.**~~ **Done**, but not by acting on the
+   change points in time — neither ffmpeg's filter clock nor its timestamps
+   survive a picture-size change, and both were tried. The scan now records
+   the *byte offset* of each change, and each part is copied out as its own
+   transport stream before being encoded. Analysis still runs over the whole
+   recording and cannot see past the change, so a size-changing recording
+   that is also cut takes its later cut points from an analysis that never
+   saw them.
 5. ~~**Report what happened.**~~ **Done.** The stream inventory, drop and
    scramble counters, and the sentences they imply are kept with the job —
    recorded when it *starts*, so a job that fails still says what it was
@@ -113,12 +120,12 @@ or so, M a few days, L a week or more.
 
 ### Stage 2 — make the logo workable (unblocks the core value)
 
-6. **A logo tool in the web UI.** Pick a recording, scrub frames, drag a
-   rectangle over the logo, scan, see the extracted logo previewed against a
-   background slider, adopt it for the channel. This is Amatsukaze's
-   `LogoAnalyzeWindow` and it is why its detection works in practice. The
-   engine side is nearly done — `--logo-rect` and the scanner exist; what is
-   missing is frame serving and the interface. **M**
+6. ~~**A logo tool in the web UI.**~~ **Built.** Pick a recording, scrub, drag
+   a box over the logo, scan, see the result previewed. Building it exposed
+   that a fit of nothing at all was being stored as a logo and reused for
+   every future recording on the channel, which is now refused. No good logo
+   has yet been learned from real broadcast: the one watermark available to
+   aim at is too faint to fit. The background slider is still missing.
 7. **Per-channel logo rules.** Several logos per channel with validity date
    ranges, and an explicit "this channel has no logo" entry so those recordings
    stop being retried hopefully. **M**
