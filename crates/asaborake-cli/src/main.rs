@@ -62,6 +62,15 @@ enum Command {
         json: bool,
     },
 
+    /// Extract the closed captions to a subtitle file.
+    Captions {
+        /// The recording to read.
+        input: PathBuf,
+        /// Where to write the subtitles. Defaults to the input with `.srt`.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
     /// Analyse a recording and report where the commercials are.
     Analyse {
         /// The recording to analyse.
@@ -224,6 +233,7 @@ fn main() -> std::process::ExitCode {
 fn run(cli: &Cli) -> Result<()> {
     match &cli.command {
         Command::Probe { input, json } => probe(input, *json),
+        Command::Captions { input, output } => captions(input, output.as_deref()),
         Command::Analyse {
             input,
             output,
@@ -340,6 +350,28 @@ fn probe(input: &Path, json: bool) -> Result<()> {
     for warning in &asaborake_core::Diagnostics::from_ts(&info).warnings {
         println!("note          {warning}");
     }
+    Ok(())
+}
+
+/// Write a recording's captions out as `SubRip`.
+fn captions(input: &Path, output: Option<&Path>) -> Result<()> {
+    let file =
+        std::fs::File::open(input).with_context(|| format!("opening {}", input.display()))?;
+    let found = asaborake_ts::caption::extract(std::io::BufReader::new(file))
+        .with_context(|| format!("reading captions from {}", input.display()))?;
+
+    if found.is_empty() {
+        bail!(
+            "{} carries no captions, or none that could be decoded",
+            input.display()
+        );
+    }
+
+    let path = output.map_or_else(|| input.with_extension("srt"), Path::to_path_buf);
+    std::fs::write(&path, asaborake_ts::to_srt(&found))
+        .with_context(|| format!("writing {}", path.display()))?;
+
+    println!("wrote {} ({} captions)", path.display(), found.len());
     Ok(())
 }
 

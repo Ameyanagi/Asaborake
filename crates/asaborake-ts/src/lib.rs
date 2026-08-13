@@ -26,12 +26,14 @@
 // constructs in shipping code, not in the suite that checks it.
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic))]
 
+pub mod caption;
 pub mod packet;
 pub mod pes;
 pub mod psi;
 pub mod scan;
 pub mod video;
 
+pub use caption::{Caption, to_srt};
 pub use packet::{PacketLayout, TsPacket};
 pub use pes::{PesHeader, PtsUnwrapper};
 pub use psi::{AudioComponent, Eit, EsInfo, PID_EIT, Pat, Pmt, StreamKind};

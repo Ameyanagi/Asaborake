@@ -34,6 +34,7 @@ async-stream = "0.3.6"
 axum = { version = "0.8.9", features = ["macros"] }
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock", "serde"] }
 clap = { version = "4.6.6", features = ["derive", "env"] }
+encoding_rs = "0.8.35"
 futures = "0.3.34"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 postcard = { version = "1.1.3", features = ["use-std"] }

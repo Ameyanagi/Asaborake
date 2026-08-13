@@ -12,6 +12,7 @@ description = "MPEG-2 TS demultiplexing and inventory for Asaborake"
 workspace = true
 
 [dependencies]
+encoding_rs = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

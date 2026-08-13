@@ -189,14 +189,6 @@ impl Diagnostics {
             ));
         }
 
-        if self.has_captions {
-            // Stated plainly because it is a known, deliberate gap rather than
-            // a fault in this recording.
-            warnings.push(
-                "this recording carries captions, which Asaborake does not yet extract".to_owned(),
-            );
-        }
-
         if self.audio.len() > 1 {
             warnings.push(format!(
                 "{} audio tracks, all carried through to the output",
@@ -394,14 +386,16 @@ mod tests {
     }
 
     #[test]
-    fn captions_are_reported_as_a_known_gap() {
+    fn captions_are_noted_without_being_called_a_problem() {
+        // They are extracted now, so their presence is inventory rather than
+        // something an operator has to act on.
         let mut streams = healthy();
         streams.push(stream(0x0114, StreamKind::Caption, 0x06));
         let diagnostics = Diagnostics::from_ts(&info(TsStats::default(), 1_000_000, streams));
 
         assert!(diagnostics.has_captions);
         assert!(
-            diagnostics.warnings.iter().any(|w| w.contains("captions")),
+            diagnostics.warnings.is_empty(),
             "{:?}",
             diagnostics.warnings
         );

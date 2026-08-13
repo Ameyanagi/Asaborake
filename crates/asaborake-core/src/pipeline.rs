@@ -243,6 +243,12 @@ pub fn run(
         on_progress,
     )?;
 
+    write_captions(
+        request,
+        &parts_of(request, diagnostics.as_ref(), &analysis),
+        &plan,
+    );
+
     let sidecar = write_sidecar(request, &analysis, &plan, diagnostics.clone())?;
 
     on_progress(PipelineProgress {
@@ -261,6 +267,86 @@ pub fn run(
     })
 }
 
+/// The parts this recording becomes, for anything that needs them twice.
+fn parts_of(
+    request: &JobRequest,
+    diagnostics: Option<&Diagnostics>,
+    analysis: &Analysis,
+) -> Vec<crate::parts::Part> {
+    let file_size = std::fs::metadata(&request.input).map_or(0, |m| m.len());
+    crate::parts::split(
+        &request.output,
+        diagnostics,
+        analysis.duration_seconds,
+        file_size,
+    )
+}
+
+/// Write the recording's captions beside each output file.
+///
+/// Re-timed through the same map the chapters use, because a subtitle that
+/// still speaks in source time drifts further out of step with every
+/// commercial removed — by the end of a programme, minutes.
+///
+/// A failure here is logged and otherwise ignored. Captions are worth having
+/// and are not worth failing a transcode for.
+fn write_captions(request: &JobRequest, parts: &[crate::parts::Part], plan: &CutPlan) {
+    let file = match std::fs::File::open(&request.input) {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(%error, "could not reopen the source to read its captions");
+            return;
+        }
+    };
+    let captions = match asaborake_ts::caption::extract(std::io::BufReader::new(file)) {
+        Ok(captions) if !captions.is_empty() => captions,
+        Ok(_) => return,
+        Err(error) => {
+            tracing::warn!(%error, "could not read the captions");
+            return;
+        }
+    };
+
+    for part in parts {
+        let keep = part.clip(&plan.keep);
+        if keep.is_empty() {
+            continue;
+        }
+        // Each part has a clock of its own, so a caption is placed against
+        // that part's kept ranges or not at all.
+        let mut retimed = Vec::new();
+        for caption in &captions {
+            let start = caption.start_seconds - part.start;
+            let end = caption.end_seconds - part.start;
+            let Some(mapped_start) = crate::chapters::source_to_output(&keep, start) else {
+                // It fell inside something that was cut out, so there is no
+                // moment in the output for it to be shown at.
+                continue;
+            };
+            let mapped_end = crate::chapters::source_to_output(&keep, end)
+                .unwrap_or(mapped_start + (end - start));
+            retimed.push(asaborake_ts::Caption {
+                start_seconds: mapped_start,
+                end_seconds: mapped_end.max(mapped_start + 0.1),
+                text: caption.text.clone(),
+            });
+        }
+        if retimed.is_empty() {
+            continue;
+        }
+
+        let path = part.output.with_extension("srt");
+        match std::fs::write(&path, asaborake_ts::to_srt(&retimed)) {
+            Ok(()) => tracing::info!(
+                path = %path.display(),
+                captions = retimed.len(),
+                "wrote subtitles"
+            ),
+            Err(error) => tracing::warn!(%error, "could not write the subtitles"),
+        }
+    }
+}
+
 /// Encode the recording, as one file or as several.
 ///
 /// A video track has one picture size for its whole length, so a recording
@@ -275,8 +361,12 @@ fn encode_parts(
     duration: f64,
     on_progress: &mut dyn FnMut(PipelineProgress),
 ) -> Result<Vec<PathBuf>, Error> {
-    let file_size = std::fs::metadata(&request.input).map_or(0, |m| m.len());
-    let parts = crate::parts::split(&request.output, diagnostics, duration, file_size);
+    let parts = crate::parts::split(
+        &request.output,
+        diagnostics,
+        duration,
+        std::fs::metadata(&request.input).map_or(0, |m| m.len()),
+    );
     if parts.len() > 1 {
         tracing::info!(
             parts = parts.len(),

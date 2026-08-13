@@ -241,7 +241,7 @@ pub fn scan<R: Read>(mut reader: R, file_size: u64) -> Result<TsInfo, Error> {
 }
 
 /// Find the next offset where a packet plausibly starts.
-fn resync(buf: &[u8], layout: PacketLayout) -> Option<usize> {
+pub(crate) fn resync(buf: &[u8], layout: PacketLayout) -> Option<usize> {
     let stride = layout.stride();
     let sync = layout.sync_offset();
     (0..buf.len().saturating_sub(stride)).find(|&offset| {
