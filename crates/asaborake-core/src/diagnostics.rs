@@ -40,8 +40,23 @@ pub struct Diagnostics {
     pub audio: Vec<String>,
     /// Whether the recording carries ARIB captions.
     pub has_captions: bool,
-    /// Points at which the picture geometry changed, in seconds.
+    /// Points at which the video format changed at all, in seconds.
     pub format_changes: Vec<f64>,
+    /// Points at which the picture *geometry* changed, in seconds.
+    ///
+    /// A subset of [`format_changes`](Self::format_changes): a frame-rate
+    /// change is re-timed by the encoder and needs nothing done about it, but
+    /// a size change cannot go in the same output file, because a video track
+    /// has one size for its whole length.
+    #[serde(default)]
+    pub split_points: Vec<f64>,
+    /// Byte offsets in the source file of those same points.
+    ///
+    /// Splitting a transport stream by byte is the only reliable way to
+    /// separate two picture sizes: both the filter clock and the timestamps
+    /// break at the change, and packet boundaries do not.
+    #[serde(default)]
+    pub split_offsets: Vec<u64>,
     /// Packets lost, inferred from continuity counters.
     pub dropped_packets: u64,
     /// Packets still scrambled, meaning decryption did not happen.
@@ -115,6 +130,8 @@ impl Diagnostics {
             audio,
             has_captions,
             format_changes: info.format_changes.iter().map(|c| c.seconds).collect(),
+            split_points: splits(info).iter().map(|c| c.seconds).collect(),
+            split_offsets: splits(info).iter().map(|c| c.byte_offset).collect(),
             dropped_packets: info.stats.dropped_packets,
             scrambled_packets: info.stats.scrambled_packets,
             error_packets: info.stats.error_packets,
@@ -122,7 +139,7 @@ impl Diagnostics {
             dual_mono,
             warnings: Vec::new(),
         };
-        diagnostics.warnings = diagnostics.describe_problems(info);
+        diagnostics.warnings = diagnostics.describe_problems();
         diagnostics
     }
 
@@ -130,7 +147,7 @@ impl Diagnostics {
     ///
     /// Thresholds rather than raw numbers, because "412 dropped packets" means
     /// nothing without knowing there were nine million of them.
-    fn describe_problems(&self, info: &TsInfo) -> Vec<String> {
+    fn describe_problems(&self) -> Vec<String> {
         let mut warnings = Vec::new();
         let total = self.total_packets.max(1) as f64;
 
@@ -163,11 +180,12 @@ impl Diagnostics {
             ));
         }
 
-        if info.requires_split() {
+        if !self.split_points.is_empty() {
             warnings.push(format!(
-                "the picture geometry changes {} time(s) mid-recording; the output holds \
-                 only the first format",
-                self.format_changes.len()
+                "the picture size changes {} time(s) mid-recording, so the output is \
+                 written as {} separate files",
+                self.split_points.len(),
+                self.split_points.len() + 1
             ));
         }
 
@@ -208,6 +226,23 @@ impl Diagnostics {
         let total = self.total_packets.max(1) as f64;
         self.scrambled_packets as f64 / total > 0.30
     }
+}
+
+/// Where the picture size changes, compared against what preceded it.
+///
+/// Against the *previous* format rather than the first, because a recording
+/// that goes HD, SD, HD needs a boundary at both changes — comparing
+/// everything to the opening format would miss the second one.
+fn splits(info: &TsInfo) -> Vec<asaborake_ts::FormatChange> {
+    let mut points = Vec::new();
+    let mut previous = info.video_format;
+    for change in &info.format_changes {
+        if previous.is_some_and(|before| before.requires_split(&change.format)) {
+            points.push(*change);
+        }
+        previous = Some(change.format);
+    }
+    points
 }
 
 /// A name for a stream kind that reads as English rather than as Rust.

@@ -474,6 +474,49 @@ fn a_bilingual_programme_comes_out_as_two_single_language_tracks() {
 }
 
 #[test]
+fn a_part_takes_only_its_own_stretch_of_the_source() {
+    // One part of a split recording is produced by selecting its frames out of
+    // a full decode, in source time. Getting the range wrong produces a file of
+    // the wrong length from the wrong place, which nothing but running it would
+    // reveal.
+    let Some(ffmpeg) = ffmpeg() else { return };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let input = dir.path().join("in.mp4");
+    let output = dir.path().join("part2.mp4");
+    render_clip(&input, 20);
+
+    let source = probe(&ffmpeg, &input).expect("probe");
+    // The second half of the clip: source seconds 10 to 20.
+    let keep = [KeepRange {
+        start: 10.0,
+        end: 20.0,
+    }];
+    let profile = cpu_profile();
+
+    encode(
+        &ffmpeg,
+        &EncodeRequest {
+            input: &input,
+            output: &output,
+            profile: &profile,
+            keep: &keep,
+            chapters: &[],
+            probe: &source,
+            dual_mono: None,
+        },
+        &mut |_| {},
+    )
+    .expect("encode succeeds");
+
+    let result = probe(&ffmpeg, &output).expect("probe output");
+    let duration = result.duration_seconds.expect("a duration");
+    assert!(
+        (duration - 10.0).abs() < 0.35,
+        "expected the second half, got {duration}s"
+    );
+}
+
+#[test]
 fn a_profile_the_build_cannot_run_fails_before_doing_any_work() {
     let Some(ffmpeg) = ffmpeg() else { return };
     let dir = tempfile::tempdir().expect("temp dir");

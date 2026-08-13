@@ -106,6 +106,17 @@ impl ProgramInfo {
 pub struct FormatChange {
     /// Position in the recording, in seconds from the first video timestamp.
     pub seconds: f64,
+    /// Byte offset in the file of the packet the new format starts at.
+    ///
+    /// A transport stream is a sequence of fixed-size packets, so cutting the
+    /// file here yields two streams that each decode on their own. That is the
+    /// only reliable way to split a format change: ffmpeg's filter graph
+    /// reinitialises when the picture size changes, restarting the frame
+    /// counter its clock is derived from, and the timestamps are no better
+    /// because a recording assembled from broadcast segments restarts those
+    /// too. Byte offsets are the one thing that keeps counting.
+    #[serde(default)]
+    pub byte_offset: u64,
     /// The format in effect from this point.
     pub format: VideoFormat,
 }
@@ -171,6 +182,9 @@ pub fn scan<R: Read>(mut reader: R, file_size: u64) -> Result<TsInfo, Error> {
 
     let mut buffer = Vec::with_capacity(CHUNK * 2);
     let mut scratch = vec![0u8; CHUNK];
+    // Where the first whole packet begins, so a byte offset recorded later is
+    // an offset into the file rather than into the packet sequence.
+    let start_offset;
 
     // Read enough to identify the layout before entering the main loop.
     let layout = loop {
@@ -182,6 +196,7 @@ pub fn scan<R: Read>(mut reader: R, file_size: u64) -> Result<TsInfo, Error> {
         match detect_layout(&buffer) {
             Ok((layout, start)) => {
                 buffer.drain(..start);
+                start_offset = start as u64;
                 break layout;
             }
             // Keep reading; a long run of leading noise is unusual but legal.
@@ -190,7 +205,7 @@ pub fn scan<R: Read>(mut reader: R, file_size: u64) -> Result<TsInfo, Error> {
         }
     };
 
-    let mut state = ScanState::new(layout);
+    let mut state = ScanState::new(layout, start_offset);
     let stride = layout.stride();
     let sync = layout.sync_offset();
 
@@ -258,6 +273,10 @@ struct ScanState {
     /// Partial elementary-stream bytes for the current video access unit.
     video_unit: Vec<u8>,
     video_unit_pts: Option<i64>,
+    /// Packet index at which the access unit being accumulated began.
+    video_unit_packet: u64,
+    /// File offset of the first packet, past any leading noise.
+    first_packet_offset: u64,
 
     pts: PtsUnwrapper,
     first_pts: Option<i64>,
@@ -270,9 +289,11 @@ struct ScanState {
 }
 
 impl ScanState {
-    fn new(layout: PacketLayout) -> Self {
+    fn new(layout: PacketLayout, first_packet_offset: u64) -> Self {
         Self {
             layout,
+            video_unit_packet: 0,
+            first_packet_offset,
             packet_count: 0,
             stats: TsStats::default(),
             continuity: ContinuityTracker::new(),
@@ -380,8 +401,10 @@ impl ScanState {
 
         if packet.payload_unit_start {
             // The previous access unit is complete; inspect it before starting
-            // the next one.
+            // the next one, while `video_unit_packet` still points at where it
+            // began.
             self.flush_video_unit();
+            self.video_unit_packet = self.packet_count.saturating_sub(1);
             if let Some(header) = PesHeader::parse(packet.payload) {
                 if let Some(raw) = header.pts {
                     let unwrapped = self.pts.push(raw);
@@ -429,7 +452,14 @@ impl ScanState {
                     .video_unit_pts
                     .zip(self.first_pts)
                     .map_or(0.0, |(now, first)| PtsUnwrapper::to_seconds(now - first));
-                self.format_changes.push(FormatChange { seconds, format });
+                let byte_offset = self
+                    .first_packet_offset
+                    .saturating_add(self.video_unit_packet * self.layout.stride() as u64);
+                self.format_changes.push(FormatChange {
+                    seconds,
+                    byte_offset,
+                    format,
+                });
                 self.current_format = Some(format);
             }
             Some(_) => {}

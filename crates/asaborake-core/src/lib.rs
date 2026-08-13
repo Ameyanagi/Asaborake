@@ -13,6 +13,7 @@
 pub mod chapters;
 pub mod diagnostics;
 pub mod encode;
+pub mod parts;
 pub mod pipeline;
 pub mod profile;
 pub mod store;
@@ -21,6 +22,7 @@ use std::path::PathBuf;
 
 pub use diagnostics::Diagnostics;
 pub use encode::{EncodeRequest, encode};
+pub use parts::{Part, split};
 pub use pipeline::{JobOutcome, JobRequest, PipelineProgress, Sidecar, inspect, run};
 pub use profile::{Container, Profile, builtin};
 pub use store::LogoStore;

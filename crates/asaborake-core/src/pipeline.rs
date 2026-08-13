@@ -88,8 +88,15 @@ impl JobRequest {
 /// What the pipeline produced.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobOutcome {
-    /// The file that was written.
+    /// The file that was asked for, and the first one written.
     pub output: PathBuf,
+    /// Every file written, in order.
+    ///
+    /// More than one when the recording changed picture size part-way through
+    /// and had to be split; `EPGStation` only knows about the first, which is
+    /// why that one keeps the name it asked for.
+    #[serde(default)]
+    pub outputs: Vec<PathBuf>,
     /// The sidecar describing the cuts.
     pub sidecar: PathBuf,
     /// What analysis found.
@@ -226,25 +233,14 @@ pub fn run(
         });
     }
 
-    let chapters = crate::chapters::chapters_for(&plan.segments, &plan.keep, plan.decision);
-
-    encode(
+    let outputs = encode_parts(
         ffmpeg,
-        &EncodeRequest {
-            input: &request.input,
-            output: &request.output,
-            profile: &request.profile,
-            keep: &plan.keep,
-            chapters: &chapters,
-            probe: &probe,
-            dual_mono: diagnostics.as_ref().and_then(|d| d.dual_mono.as_ref()),
-        },
-        &mut |fraction| {
-            on_progress(PipelineProgress {
-                fraction: ANALYSIS_SHARE + fraction * (1.0 - ANALYSIS_SHARE),
-                message: "encoding".to_owned(),
-            });
-        },
+        request,
+        &probe,
+        &plan,
+        diagnostics.as_ref(),
+        analysis.duration_seconds,
+        on_progress,
     )?;
 
     let sidecar = write_sidecar(request, &analysis, &plan, diagnostics.clone())?;
@@ -256,12 +252,127 @@ pub fn run(
 
     Ok(JobOutcome {
         output: request.output.clone(),
+        outputs,
         sidecar,
         analysis,
         plan,
         logo_learned,
         diagnostics,
     })
+}
+
+/// Encode the recording, as one file or as several.
+///
+/// A video track has one picture size for its whole length, so a recording
+/// that changes size part-way through becomes more than one file. Every
+/// ordinary recording is a single part and takes the same path.
+fn encode_parts(
+    ffmpeg: &Ffmpeg,
+    request: &JobRequest,
+    probe: &asaborake_media::MediaProbe,
+    plan: &CutPlan,
+    diagnostics: Option<&Diagnostics>,
+    duration: f64,
+    on_progress: &mut dyn FnMut(PipelineProgress),
+) -> Result<Vec<PathBuf>, Error> {
+    let file_size = std::fs::metadata(&request.input).map_or(0, |m| m.len());
+    let parts = crate::parts::split(&request.output, diagnostics, duration, file_size);
+    if parts.len() > 1 {
+        tracing::info!(
+            parts = parts.len(),
+            "the picture size changes mid-recording; writing one file per size"
+        );
+    }
+
+    // Each part gets its own slice of what is left of the progress bar, so the
+    // bar advances once across the whole job rather than restarting per file.
+    let share = (1.0 - ANALYSIS_SHARE) / parts.len() as f64;
+
+    let mut outputs = Vec::with_capacity(parts.len());
+    for (index, part) in parts.iter().enumerate() {
+        let keep = part.clip(&plan.keep);
+        if keep.is_empty() {
+            // Every second of this part was judged a commercial. Writing an
+            // empty file would be worse than writing none.
+            tracing::info!(part = index + 1, "nothing to keep in this part; skipping");
+            continue;
+        }
+        let segments = clip_segments(&plan.segments, part);
+        let chapters = crate::chapters::chapters_for(&segments, &keep, plan.decision);
+
+        let base = ANALYSIS_SHARE + share * index as f64;
+        let label = if parts.len() > 1 {
+            format!("encoding part {} of {}", index + 1, parts.len())
+        } else {
+            "encoding".to_owned()
+        };
+
+        // A part of a split recording is cut out of the source as its own
+        // transport stream first. Encoding it in place is not possible: the
+        // filter graph reinitialises at the picture-size change and restarts
+        // the frame counter its clock comes from, so no expression over time
+        // can name the far side of the change.
+        let slice = part.extract(&request.input, &part.output.with_extension("part.ts"))?;
+        let source = slice.as_deref().unwrap_or(&request.input);
+
+        // The slice is its own file, so ffmpeg's view of it — its duration
+        // above all — has to be taken from the slice rather than the whole.
+        let sliced_probe = match slice {
+            Some(_) => Some(asaborake_media::probe(ffmpeg, source).map_err(Error::Media)?),
+            None => None,
+        };
+        let probe = sliced_probe.as_ref().unwrap_or(probe);
+
+        let result = encode(
+            ffmpeg,
+            &EncodeRequest {
+                input: source,
+                output: &part.output,
+                profile: &request.profile,
+                keep: &keep,
+                chapters: &chapters,
+                probe,
+                dual_mono: diagnostics.and_then(|d| d.dual_mono.as_ref()),
+            },
+            &mut |fraction| {
+                on_progress(PipelineProgress {
+                    fraction: base + fraction * share,
+                    message: label.clone(),
+                });
+            },
+        );
+
+        // The slice is scratch space; it is the size of the part it holds and
+        // must not be left behind whether the encode worked or not.
+        if let Some(slice) = &slice {
+            let _ = std::fs::remove_file(slice);
+        }
+        result?;
+        outputs.push(part.output.clone());
+    }
+    Ok(outputs)
+}
+
+/// The segments falling inside one part, rebased to it.
+///
+/// Chapters are built from segments against the kept ranges, and a part cut
+/// out of the source has a clock of its own starting at zero.
+fn clip_segments(
+    segments: &[asaborake_cmcut::Segment],
+    part: &crate::parts::Part,
+) -> Vec<asaborake_cmcut::Segment> {
+    segments
+        .iter()
+        .filter_map(|segment| {
+            let start = segment.start.max(part.start);
+            let end = segment.end.min(part.end);
+            (end - start > 0.001).then_some(asaborake_cmcut::Segment {
+                start: start - part.start,
+                end: end - part.start,
+                ..*segment
+            })
+        })
+        .collect()
 }
 
 /// Cache a freshly learned logo, so the next recording on this channel skips
@@ -448,6 +559,8 @@ mod tests {
             audio: Vec::new(),
             has_captions: false,
             format_changes: Vec::new(),
+            split_points: Vec::new(),
+            split_offsets: Vec::new(),
             dropped_packets: 0,
             scrambled_packets: 900_000,
             error_packets: 0,

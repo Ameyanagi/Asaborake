@@ -201,18 +201,25 @@ pub fn encode(
         });
     }
 
-    // The chapter file has to outlive the ffmpeg run, so it is kept in scope
-    // for the whole function rather than being written inline.
+    // The chapter file has to outlive the ffmpeg run, so it is written here
+    // and removed below rather than inline.
     let chapter_file = write_chapters(request)?;
     let command = build_command(ffmpeg, request, chapter_file.as_deref());
 
     let total = request.output_seconds();
-    asaborake_media::run_with_progress(command, |progress: Progress| {
+    let result = asaborake_media::run_with_progress(command, |progress: Progress| {
         if total > 0.0 {
             on_progress((progress.out_time_seconds / total).clamp(0.0, 1.0));
         }
-    })
-    .map_err(Error::Media)?;
+    });
+
+    // Scratch, and it was being left in the recordings directory beside every
+    // output. Removed whether the encode worked or not, because a failed job
+    // leaves no less litter than a successful one.
+    if let Some(path) = &chapter_file {
+        let _ = std::fs::remove_file(path);
+    }
+    result.map_err(Error::Media)?;
 
     Ok(())
 }
