@@ -129,9 +129,10 @@ or so, M a few days, L a week or more.
 7. **Per-channel logo rules.** Several logos per channel with validity date
    ranges, and an explicit "this channel has no logo" entry so those recordings
    stop being retried hopefully. **M**
-8. **Block rather than guess.** A new job state for "no usable logo yet", so
-   recordings wait for a logo instead of quietly being kept whole. Pairs with
-   the logo tool: the queue tells you what it needs. **S**
+8. ~~**Block rather than guess.**~~ **Done.** `on_low_confidence = "block"`
+   holds a job in a `blocked` state before the encode rather than after it,
+   with a message naming what it needs. Deliberately not coloured as a
+   failure. Off by default.
 9. **Amatsukaze `.lgd` import.** Existing logo packs are the fastest route to
    working detection, and the format is documented in `LogoScan.hpp`. **S**
 
