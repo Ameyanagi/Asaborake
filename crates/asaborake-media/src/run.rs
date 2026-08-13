@@ -118,7 +118,7 @@ pub fn run_with_progress(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let program = format!("{:?}", command.get_program());
+    let program = command.get_program().display().to_string();
     let mut child = command.spawn().map_err(|source| Error::Spawn {
         program: program.clone(),
         source,
@@ -185,7 +185,7 @@ pub fn capture_stdout(mut command: Command) -> Result<Vec<u8>, Error> {
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let program = format!("{:?}", command.get_program());
+    let program = command.get_program().display().to_string();
     let mut child = command.spawn().map_err(|source| Error::Spawn {
         program: program.clone(),
         source,
@@ -249,10 +249,7 @@ mod tests {
     #[test]
     fn reports_a_missing_binary_as_a_spawn_error() {
         let command = Command::new("asaborake-no-such-binary");
-        assert!(matches!(
-            capture_stdout(command),
-            Err(Error::Spawn { .. })
-        ));
+        assert!(matches!(capture_stdout(command), Err(Error::Spawn { .. })));
     }
 
     #[test]

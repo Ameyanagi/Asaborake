@@ -2,7 +2,7 @@
 //!
 //! Asaborake never links libav. It spawns `ffmpeg` and `ffprobe` and talks to
 //! them over pipes, which means it works against whatever build the host image
-//! already ships — including the NVENC-enabled builds in the EPGStation and
+//! already ships — including the NVENC-enabled builds in the `EPGStation` and
 //! mirakc images — without a compile-time dependency on any of it.
 
 use std::path::{Path, PathBuf};
@@ -21,8 +21,10 @@ pub const MINIMUM_FFMPEG_VERSION: (u32, u32) = (5, 1);
 /// A located ffmpeg installation.
 #[derive(Debug, Clone)]
 pub struct Ffmpeg {
-    ffmpeg: PathBuf,
-    ffprobe: PathBuf,
+    /// The `ffmpeg` binary, which does all the decoding and encoding.
+    encoder: PathBuf,
+    /// The `ffprobe` binary, used only for inspection.
+    prober: PathBuf,
     version: (u32, u32),
     encoders: Vec<String>,
 }
@@ -68,8 +70,8 @@ impl Ffmpeg {
         let encoders = list_encoders(&ffmpeg);
 
         Ok(Self {
-            ffmpeg,
-            ffprobe,
+            encoder: ffmpeg,
+            prober: ffprobe,
             version,
             encoders,
         })
@@ -78,13 +80,13 @@ impl Ffmpeg {
     /// Path to the `ffmpeg` binary.
     #[must_use]
     pub fn ffmpeg_path(&self) -> &Path {
-        &self.ffmpeg
+        &self.encoder
     }
 
     /// Path to the `ffprobe` binary.
     #[must_use]
     pub fn ffprobe_path(&self) -> &Path {
-        &self.ffprobe
+        &self.prober
     }
 
     /// Major and minor version of the ffmpeg build.
@@ -113,7 +115,7 @@ impl Ffmpeg {
     /// no banner, no stdin, and errors only on stderr.
     #[must_use]
     pub fn command(&self) -> Command {
-        let mut command = Command::new(&self.ffmpeg);
+        let mut command = Command::new(&self.encoder);
         command.args(["-hide_banner", "-nostdin", "-loglevel", "error"]);
         command
     }
@@ -136,7 +138,10 @@ fn parse_version(banner: &str) -> Option<(u32, u32)> {
 
 /// Ask ffmpeg which encoders it was built with.
 fn list_encoders(ffmpeg: &Path) -> Vec<String> {
-    let Ok(output) = Command::new(ffmpeg).args(["-hide_banner", "-encoders"]).output() else {
+    let Ok(output) = Command::new(ffmpeg)
+        .args(["-hide_banner", "-encoders"])
+        .output()
+    else {
         return Vec::new();
     };
     let text = String::from_utf8_lossy(&output.stdout);
@@ -181,7 +186,10 @@ mod tests {
     fn rejects_a_banner_with_no_version() {
         assert_eq!(parse_version("something else entirely"), None);
         // Self-built binaries sometimes report only a git hash.
-        assert_eq!(parse_version("ffmpeg version git-2024-01-01 Copyright"), None);
+        assert_eq!(
+            parse_version("ffmpeg version git-2024-01-01 Copyright"),
+            None
+        );
     }
 
     #[test]
