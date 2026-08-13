@@ -55,6 +55,12 @@ pub struct AudioStream {
     pub channels: u32,
     /// Sample rate in Hz.
     pub sample_rate: u32,
+    /// ISO 639 language tag, when the stream declares one.
+    ///
+    /// Japanese broadcast tags a bilingual programme's two tracks, so carrying
+    /// this through is what lets a player offer the choice rather than
+    /// presenting two identical-looking tracks.
+    pub language: Option<String>,
 }
 
 /// What ffmpeg reports about a file.
@@ -146,6 +152,11 @@ pub fn probe(ffmpeg: &Ffmpeg, input: &Path) -> Result<MediaProbe, Error> {
                 .as_deref()
                 .and_then(|r| r.parse().ok())
                 .unwrap_or(48_000),
+            language: s
+                .tags
+                .as_ref()
+                .and_then(|tags| tags.language.clone())
+                .filter(|tag| !tag.is_empty() && tag != "und"),
         })
         .collect();
 
@@ -196,6 +207,12 @@ struct RawStream {
     field_order: Option<String>,
     channels: Option<u32>,
     sample_rate: Option<String>,
+    tags: Option<RawTags>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTags {
+    language: Option<String>,
 }
 
 #[cfg(test)]
@@ -218,12 +235,14 @@ mod tests {
             codec: "aac".into(),
             channels: 1,
             sample_rate: 48_000,
+            language: Some("jpn".into()),
         };
         let stereo = AudioStream {
             index: 1,
             codec: "aac".into(),
             channels: 2,
             sample_rate: 48_000,
+            language: None,
         };
 
         let dual = MediaProbe {

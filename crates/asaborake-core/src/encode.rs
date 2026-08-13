@@ -44,11 +44,59 @@ pub struct EncodeRequest<'a> {
     pub probe: &'a MediaProbe,
 }
 
+/// How the audio streams are carried into the output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioPlan {
+    /// Copied byte for byte.
+    ///
+    /// Broadcast audio is already AAC, which is what the output container
+    /// wants, so re-encoding it only loses quality and spends time. This is
+    /// possible whenever nothing is being cut, because the stream is then
+    /// passed through untouched.
+    Copy,
+    /// Decoded, selected and re-encoded.
+    ///
+    /// Required when material is being removed: the cut has to fall inside the
+    /// audio stream, and a coded stream cannot be cut at an arbitrary point
+    /// without decoding it.
+    Reencode,
+}
+
 impl EncodeRequest<'_> {
     /// Duration of the output, in seconds.
     #[must_use]
     pub fn output_seconds(&self) -> f64 {
         self.keep.iter().map(KeepRange::duration).sum()
+    }
+
+    /// How many audio streams the source carries.
+    ///
+    /// Every one becomes a track. Japanese broadcast routinely carries two —
+    /// a bilingual programme's main and sub language — and mapping only the
+    /// first silently discards the second.
+    #[must_use]
+    pub fn audio_streams(&self) -> usize {
+        self.probe.audio.len().max(1)
+    }
+
+    /// Whether the audio can be copied rather than re-encoded.
+    #[must_use]
+    pub fn audio_plan(&self) -> AudioPlan {
+        if self.is_cutting() {
+            return AudioPlan::Reencode;
+        }
+        // A container that cannot carry the source codec forces a re-encode
+        // even when nothing is being cut.
+        let carried = self
+            .probe
+            .audio
+            .iter()
+            .all(|stream| self.profile.container.can_carry(&stream.codec));
+        if carried && !self.probe.audio.is_empty() {
+            AudioPlan::Copy
+        } else {
+            AudioPlan::Reencode
+        }
     }
 
     /// Whether any material is actually being removed.
@@ -142,16 +190,54 @@ fn build_command(
         command.args(["-map_metadata", "1"]);
     }
 
+    let plan = request.audio_plan();
+    let streams = request.audio_streams();
+
     let graph = filter_graph(request, interlaced);
     command.args(["-filter_complex", &graph]);
-    command.args(["-map", "[v]", "-map", "[a]"]);
+    command.args(["-map", "[v]"]);
+
+    match plan {
+        AudioPlan::Copy => {
+            // Straight from the source, one map per stream, so a bilingual
+            // programme keeps both languages.
+            for index in 0..streams {
+                command.args(["-map", &format!("0:a:{index}?")]);
+            }
+        }
+        AudioPlan::Reencode => {
+            for index in 0..streams {
+                command.args(["-map", &format!("[a{index}]")]);
+            }
+        }
+    }
 
     command.arg("-c:v").arg(&profile.video.encoder);
     command.args(&profile.video.args);
-    command.arg("-c:a").arg(&profile.audio.encoder);
-    command.args(&profile.audio.args);
-    command.args(["-ac", &profile.audio.channels.to_string()]);
-    command.args(["-ar", &profile.audio.sample_rate.to_string()]);
+
+    match plan {
+        AudioPlan::Copy => {
+            command.args(["-c:a", "copy"]);
+        }
+        AudioPlan::Reencode => {
+            command.arg("-c:a").arg(&profile.audio.encoder);
+            command.args(&profile.audio.args);
+            // Channel and rate conversion only make sense when decoding; with
+            // a copy they would contradict the stream being copied.
+            command.args(["-ac", &profile.audio.channels.to_string()]);
+            command.args(["-ar", &profile.audio.sample_rate.to_string()]);
+        }
+    }
+
+    // Carry each track's language through, so a player can offer the choice.
+    for (index, stream) in request.probe.audio.iter().enumerate() {
+        if let Some(language) = stream.language.as_deref() {
+            command.args([
+                &format!("-metadata:s:a:{index}"),
+                &format!("language={language}"),
+            ]);
+        }
+    }
 
     if profile.container == crate::profile::Container::Mp4 {
         // Put the index at the front so the file starts playing before it has
@@ -166,6 +252,10 @@ fn build_command(
 }
 
 /// Build the `-filter_complex` graph.
+///
+/// The video always goes through a chain. The audio only does when it is being
+/// re-encoded — a copied stream never enters the graph, because passing it
+/// through a filter would mean decoding it, which is the thing being avoided.
 fn filter_graph(request: &EncodeRequest<'_>, interlaced: bool) -> String {
     let mut video: Vec<String> = request.profile.video_filters(interlaced);
     let mut audio: Vec<String> = Vec::new();
@@ -206,7 +296,18 @@ fn filter_graph(request: &EncodeRequest<'_>, interlaced: bool) -> String {
         audio.push("anull".to_owned());
     }
 
-    format!("[0:v]{}[v];[0:a]{}[a]", video.join(","), audio.join(","))
+    let mut chains = vec![format!("[0:v]{}[v]", video.join(","))];
+
+    // One chain per audio stream when re-encoding; none at all when copying,
+    // since a copied stream is mapped straight from the input.
+    if request.audio_plan() == AudioPlan::Reencode {
+        let joined = audio.join(",");
+        for index in 0..request.audio_streams() {
+            chains.push(format!("[0:a:{index}]{joined}[a{index}]"));
+        }
+    }
+
+    chains.join(";")
 }
 
 /// The `between(...)` expression selecting the kept ranges.
@@ -228,6 +329,11 @@ mod tests {
     use asaborake_media::{MediaProbe, VideoStream};
 
     fn probe(interlaced: bool, duration: f64) -> MediaProbe {
+        probe_with_audio(interlaced, duration, 1)
+    }
+
+    /// A probe carrying `tracks` AAC audio streams, as broadcast does.
+    fn probe_with_audio(interlaced: bool, duration: f64, tracks: usize) -> MediaProbe {
         MediaProbe {
             duration_seconds: Some(duration),
             video: Some(VideoStream {
@@ -239,7 +345,19 @@ mod tests {
                 pixel_format: "yuv420p".into(),
                 interlaced,
             }),
-            audio: Vec::new(),
+            audio: (0..tracks)
+                .map(|index| asaborake_media::AudioStream {
+                    index: index as u32 + 1,
+                    codec: "aac".into(),
+                    channels: 2,
+                    sample_rate: 48_000,
+                    language: Some(if index == 0 {
+                        "jpn".into()
+                    } else {
+                        "eng".into()
+                    }),
+                })
+                .collect(),
         }
     }
 
@@ -310,7 +428,9 @@ mod tests {
 
         assert!(!graph.contains("select"), "{graph}");
         assert!(graph.contains("bwdif"), "{graph}");
-        assert!(graph.ends_with("[0:a]anull[a]"), "{graph}");
+        // And no audio chain at all: with nothing to cut the streams are
+        // copied, and a copied stream must not be decoded.
+        assert!(!graph.contains("[0:a"), "{graph}");
     }
 
     #[test]
@@ -371,6 +491,101 @@ mod tests {
             graph.starts_with("[0:v]setpts=N/FRAME_RATE/TB,select="),
             "{graph}"
         );
+    }
+
+    #[test]
+    fn audio_is_copied_when_nothing_is_being_cut() {
+        // Broadcast audio is already AAC, which is what the container wants.
+        // Re-encoding it only loses quality and spends time.
+        let profile = builtin().remove("x264-cpu").expect("profile");
+        let probe = probe_with_audio(true, 600.0, 2);
+        let keep = [KeepRange {
+            start: 0.0,
+            end: 600.0,
+        }];
+        assert_eq!(
+            request(&profile, &keep, &probe).audio_plan(),
+            AudioPlan::Copy
+        );
+    }
+
+    #[test]
+    fn audio_is_re_encoded_when_material_is_removed() {
+        // A coded stream cannot be cut at an arbitrary point without decoding.
+        let profile = builtin().remove("x264-cpu").expect("profile");
+        let probe = probe_with_audio(true, 600.0, 2);
+        let keep = [
+            KeepRange {
+                start: 0.0,
+                end: 100.0,
+            },
+            KeepRange {
+                start: 200.0,
+                end: 300.0,
+            },
+        ];
+        assert_eq!(
+            request(&profile, &keep, &probe).audio_plan(),
+            AudioPlan::Reencode
+        );
+    }
+
+    #[test]
+    fn every_audio_stream_gets_its_own_chain_when_re_encoding() {
+        // A bilingual programme carries two streams; mapping only the first
+        // silently discards a language.
+        let profile = builtin().remove("x264-cpu").expect("profile");
+        let probe = probe_with_audio(true, 600.0, 2);
+        let keep = [
+            KeepRange {
+                start: 0.0,
+                end: 100.0,
+            },
+            KeepRange {
+                start: 200.0,
+                end: 300.0,
+            },
+        ];
+        let graph = filter_graph(&request(&profile, &keep, &probe), true);
+
+        assert!(graph.contains("[0:a:0]"), "{graph}");
+        assert!(graph.contains("[a0]"), "{graph}");
+        assert!(graph.contains("[0:a:1]"), "{graph}");
+        assert!(graph.contains("[a1]"), "{graph}");
+        assert_eq!(
+            graph.matches("aselect=").count(),
+            2,
+            "one per stream: {graph}"
+        );
+    }
+
+    #[test]
+    fn a_copied_stream_never_enters_the_filter_graph() {
+        // Passing it through a filter would mean decoding it, which is the
+        // thing being avoided.
+        let profile = builtin().remove("x264-cpu").expect("profile");
+        let probe = probe_with_audio(true, 600.0, 2);
+        let keep = [KeepRange {
+            start: 0.0,
+            end: 600.0,
+        }];
+        let graph = filter_graph(&request(&profile, &keep, &probe), true);
+
+        assert!(!graph.contains("0:a"), "{graph}");
+        assert!(!graph.contains("anull"), "{graph}");
+        assert!(
+            graph.contains("[0:v]"),
+            "the video still needs one: {graph}"
+        );
+    }
+
+    #[test]
+    fn a_container_that_cannot_carry_the_codec_forces_a_re_encode() {
+        use crate::profile::Container;
+        assert!(Container::Mp4.can_carry("aac"));
+        assert!(!Container::Mp4.can_carry("pcm_s16le"));
+        // Matroska takes essentially anything.
+        assert!(Container::Mkv.can_carry("pcm_s16le"));
     }
 
     #[test]

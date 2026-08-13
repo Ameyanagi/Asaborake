@@ -220,6 +220,157 @@ fn chapters_reach_the_output_file() {
     assert!(text.contains("CM 1"), "chapters missing from {text}");
 }
 
+/// Render a clip with two distinct audio tracks, as a bilingual programme has.
+fn render_bilingual(path: &Path, seconds: u32) {
+    let status = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc=size=160x120:rate=25:duration={seconds}"),
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency=440:sample_rate=48000:duration={seconds}"),
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency=880:sample_rate=48000:duration={seconds}"),
+        ])
+        .args(["-map", "0:v", "-map", "1:a", "-map", "2:a"])
+        .args([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .args(["-c:a", "aac", "-shortest"])
+        .args(["-metadata:s:a:0", "language=jpn"])
+        .args(["-metadata:s:a:1", "language=eng"])
+        .arg(path)
+        .status()
+        .expect("ffmpeg runs");
+    assert!(status.success(), "failed to render the bilingual clip");
+}
+
+/// Count the audio streams in a file.
+fn audio_tracks(path: &Path) -> usize {
+    let out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .output()
+        .expect("ffprobe runs");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+}
+
+#[test]
+fn both_audio_tracks_survive_a_cut() {
+    // A bilingual programme carries two audio streams. Mapping only the first
+    // silently discards a language, which is what Asaborake used to do.
+    let Some(ffmpeg) = ffmpeg() else { return };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let input = dir.path().join("in.mp4");
+    let output = dir.path().join("out.mp4");
+    render_bilingual(&input, 12);
+
+    let source = probe(&ffmpeg, &input).expect("probe");
+    assert_eq!(source.audio.len(), 2, "the fixture should have two tracks");
+
+    let keep = [
+        KeepRange {
+            start: 0.0,
+            end: 3.0,
+        },
+        KeepRange {
+            start: 6.0,
+            end: 9.0,
+        },
+    ];
+    let profile = cpu_profile();
+
+    encode(
+        &ffmpeg,
+        &EncodeRequest {
+            input: &input,
+            output: &output,
+            profile: &profile,
+            keep: &keep,
+            chapters: &[],
+            probe: &source,
+        },
+        &mut |_| {},
+    )
+    .expect("encode succeeds");
+
+    assert_eq!(audio_tracks(&output), 2, "both languages must survive");
+
+    let result = probe(&ffmpeg, &output).expect("probe output");
+    let duration = result.duration_seconds.expect("a duration");
+    assert!(
+        (duration - 6.0).abs() < 0.35,
+        "expected about 6s, got {duration}s"
+    );
+}
+
+#[test]
+fn audio_is_copied_when_nothing_is_cut() {
+    // Broadcast audio is already AAC; re-encoding it only loses quality. The
+    // give-away is that a copied AAC stream keeps its exact codec and rate.
+    let Some(ffmpeg) = ffmpeg() else { return };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let input = dir.path().join("in.mp4");
+    let output = dir.path().join("out.mp4");
+    render_bilingual(&input, 6);
+
+    let source = probe(&ffmpeg, &input).expect("probe");
+    let keep = [KeepRange {
+        start: 0.0,
+        end: source.duration_seconds.expect("a duration"),
+    }];
+    let profile = cpu_profile();
+
+    encode(
+        &ffmpeg,
+        &EncodeRequest {
+            input: &input,
+            output: &output,
+            profile: &profile,
+            keep: &keep,
+            chapters: &[],
+            probe: &source,
+        },
+        &mut |_| {},
+    )
+    .expect("encode succeeds");
+
+    let result = probe(&ffmpeg, &output).expect("probe output");
+    assert_eq!(result.audio.len(), 2, "both tracks copied");
+    assert!(
+        result.audio.iter().all(|a| a.codec == "aac"),
+        "copied streams stay AAC: {:?}",
+        result.audio
+    );
+}
+
 #[test]
 fn a_profile_the_build_cannot_run_fails_before_doing_any_work() {
     let Some(ffmpeg) = ffmpeg() else { return };

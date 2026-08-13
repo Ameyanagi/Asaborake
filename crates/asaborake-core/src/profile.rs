@@ -43,6 +43,21 @@ impl Container {
             Self::Mkv => "matroska",
         }
     }
+
+    /// Whether this container can carry an audio codec as-is.
+    ///
+    /// Broadcast audio is AAC and both containers take it, so the usual answer
+    /// is yes — which is what makes copying rather than re-encoding possible.
+    #[must_use]
+    pub fn can_carry(self, codec: &str) -> bool {
+        match self {
+            // MP4 is fussy: AAC and the MPEG audio family, and little else
+            // that a broadcast recording would contain.
+            Self::Mp4 => matches!(codec, "aac" | "mp3" | "ac3" | "eac3"),
+            // Matroska takes essentially anything.
+            Self::Mkv => true,
+        }
+    }
 }
 
 /// Video encoding settings.
