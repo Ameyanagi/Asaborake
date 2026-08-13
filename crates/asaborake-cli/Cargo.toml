@@ -1,0 +1,33 @@
+[package]
+name = "asaborake-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Command-line interface for Asaborake"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "asaborake"
+path = "src/main.rs"
+
+[dependencies]
+asaborake-analyze = { workspace = true }
+asaborake-cmcut = { workspace = true }
+asaborake-core = { workspace = true }
+asaborake-media = { workspace = true }
+asaborake-ts = { workspace = true }
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

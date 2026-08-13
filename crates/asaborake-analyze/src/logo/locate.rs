@@ -11,9 +11,18 @@
 //! low variance. Content that merely happens to be detailed fluctuates frame
 //! to frame as the picture moves underneath it.
 //!
-//! So each pixel is scored by the ratio of the mean edge strength to its
-//! standard deviation, and the strongest connected region near a frame edge
-//! wins.
+//! That is still not enough, because a recording contains long stretches that
+//! are static for reasons of their own: a held title card, a station ident, a
+//! test pattern, a slide. Measured across the whole recording, any of those
+//! can look steadier than the logo.
+//!
+//! What a logo has and they do not is *persistence*. It is there through the
+//! programme — most of the recording — while a static interlude is there for
+//! one stretch and gone. So the recording is divided into chunks, each scored
+//! separately, and a pixel counts as logo-like only if it stands out in the
+//! majority of them.
+
+use std::collections::VecDeque;
 
 use asaborake_media::Frame;
 
@@ -38,20 +47,51 @@ const MINIMUM_AREA: usize = 64;
 /// small on its own and only meaningful alongside the others.
 const MINIMUM_BLOB_AREA: usize = 8;
 
-/// A candidate region wider or taller than this fraction of the frame is
-/// scenery, not a logo.
-const MAXIMUM_EXTENT: f32 = 0.45;
+/// A candidate wider than this fraction of the frame is scenery, not a logo.
+///
+/// Station marks are small. Even a wide one with the channel name spelled out
+/// is well under a fifth of the picture, and allowing more lets a static
+/// element of the set — a window, a desk, a caption bar — win on area alone.
+const MAXIMUM_WIDTH: f32 = 0.22;
+
+/// The same for height. Logos are wider than they are tall far more often than
+/// the reverse, so this is tighter.
+const MAXIMUM_HEIGHT: f32 = 0.18;
+
+/// Frames per chunk, in the decimated stream the locator is fed.
+///
+/// At the usual decimation this is roughly twenty seconds of recording: long
+/// enough for a chunk's statistics to mean something, short enough that a
+/// half-hour programme yields plenty of chunks to vote.
+const FRAMES_PER_CHUNK: u32 = 60;
+
+/// Fraction of chunks a pixel must stand out in to be part of a logo.
+///
+/// A logo is present through the programme, which is the majority of any
+/// recording. A static interlude is present for one stretch of it.
+const REQUIRED_CHUNK_SHARE: f32 = 0.5;
 
 /// Accumulates the evidence needed to locate a logo.
 #[derive(Debug)]
 pub struct LogoLocator {
     width: u32,
     height: u32,
-    /// Running sum of edge strength per pixel.
+    /// Running sum of edge strength per pixel, for the chunk in progress.
     sum: Vec<f32>,
-    /// Running sum of squared edge strength per pixel.
+    /// Running sum of squared edge strength per pixel, for the same chunk.
     sum_squares: Vec<f32>,
+    /// Frames in the chunk in progress.
+    chunk_frames: u32,
+    /// How many chunks each pixel stood out in.
+    ///
+    /// One counter per pixel rather than one steadiness map per chunk, so the
+    /// memory does not grow with the length of the recording.
+    votes: Vec<u16>,
+    /// Chunks completed so far.
+    chunks: u16,
     frames: u32,
+    /// Rows a logo may occupy, computed once.
+    rows: VecDeque<u32>,
 }
 
 impl LogoLocator {
@@ -59,12 +99,22 @@ impl LogoLocator {
     #[must_use]
     pub fn new(width: u32, height: u32) -> Self {
         let count = (width as usize) * (height as usize);
+        let band = ((height as f32) * EDGE_BAND) as u32;
+        let band = band.max(2).min(height / 2);
+        let rows = (1..band)
+            .chain((height - band)..(height.saturating_sub(1)))
+            .collect();
+
         Self {
             width,
             height,
             sum: vec![0.0; count],
             sum_squares: vec![0.0; count],
+            chunk_frames: 0,
+            votes: vec![0; count],
+            chunks: 0,
             frames: 0,
+            rows,
         }
     }
 
@@ -79,67 +129,88 @@ impl LogoLocator {
         if frame.width != self.width || frame.height != self.height {
             return;
         }
-        // The band is scanned rather than the whole frame: the middle cannot
-        // hold a logo, and skipping it is most of the work saved. The rows are
-        // collected first so the accumulators can be borrowed mutably below.
-        let rows: Vec<u32> = self.rows().collect();
-        for y in rows {
+        // Only the bands a logo can occupy are scanned; the middle of the
+        // picture cannot hold one, and skipping it is most of the work saved.
+        for index in 0..self.rows.len() {
+            let Some(&y) = self.rows.get(index) else {
+                continue;
+            };
             for x in 1..self.width - 1 {
                 let strength = edge_strength(frame, x, y);
-                let index = (y * self.width + x) as usize;
+                let offset = (y * self.width + x) as usize;
                 if let (Some(sum), Some(squares)) =
-                    (self.sum.get_mut(index), self.sum_squares.get_mut(index))
+                    (self.sum.get_mut(offset), self.sum_squares.get_mut(offset))
                 {
                     *sum += strength;
                     *squares += strength * strength;
                 }
             }
         }
+
         self.frames += 1;
+        self.chunk_frames += 1;
+        if self.chunk_frames >= FRAMES_PER_CHUNK {
+            self.close_chunk();
+        }
     }
 
-    /// Rows within the bands a logo may occupy.
-    fn rows(&self) -> impl Iterator<Item = u32> + '_ {
-        let band = ((self.height as f32) * EDGE_BAND) as u32;
-        let band = band.max(2).min(self.height / 2);
-        (1..band).chain((self.height - band)..(self.height - 1))
+    /// Score the chunk in progress and fold it into the votes.
+    fn close_chunk(&mut self) {
+        if self.chunk_frames == 0 || self.chunks == u16::MAX {
+            return;
+        }
+        let scores = steadiness(&self.sum, &self.sum_squares, self.chunk_frames);
+        let peak = scores.iter().copied().fold(0.0f32, f32::max);
+
+        if peak > 0.0 {
+            let threshold = peak * CHUNK_THRESHOLD;
+            for (vote, &score) in self.votes.iter_mut().zip(&scores) {
+                if score >= threshold {
+                    *vote += 1;
+                }
+            }
+            self.chunks += 1;
+        }
+
+        self.sum.fill(0.0);
+        self.sum_squares.fill(0.0);
+        self.chunk_frames = 0;
     }
 
     /// The most logo-like region found, if any.
     #[must_use]
-    pub fn finish(&self) -> Option<Rect> {
+    pub fn finish(&mut self) -> Option<Rect> {
         if self.frames < MINIMUM_FRAMES {
             tracing::debug!(frames = self.frames, "too few frames to locate a logo");
             return None;
         }
-
-        let scores = self.steadiness_map();
-        // A relative threshold adapts to how contrasty the channel's logo is;
-        // an absolute one would miss faint logos and over-select bold ones.
-        let peak = scores.iter().copied().fold(0.0f32, f32::max);
-        if peak <= 0.0 {
+        // Fold in whatever the last, possibly short, chunk saw.
+        self.close_chunk();
+        if self.chunks == 0 {
             return None;
         }
-        let threshold = peak * 0.45;
 
-        // Collect every above-threshold blob, not just the largest. A station
-        // mark is routinely several disconnected glyphs — a symbol beside
-        // kanji, or characters that never touch — and four-connectivity
-        // separates them. Taking only the biggest would learn one glyph and
-        // leave the rest of the logo unmodelled.
+        // A pixel is logo-like when it stood out in the majority of chunks.
+        // A test pattern held for one stretch of the recording stands out
+        // overwhelmingly in its own chunks and not at all in the rest.
+        let required = ((f32::from(self.chunks) * REQUIRED_CHUNK_SHARE).ceil() as u16).max(1);
+
         let mut blobs: Vec<(usize, Rect)> = Vec::new();
-        let mut visited = vec![false; scores.len()];
-        for y in self.rows() {
+        let mut visited = vec![false; self.votes.len()];
+        for index in 0..self.rows.len() {
+            let Some(&y) = self.rows.get(index) else {
+                continue;
+            };
             for x in 1..self.width - 1 {
-                let index = (y * self.width + x) as usize;
-                if visited.get(index).copied().unwrap_or(true) {
+                let offset = (y * self.width + x) as usize;
+                if visited.get(offset).copied().unwrap_or(true) {
                     continue;
                 }
-                if scores.get(index).copied().unwrap_or(0.0) < threshold {
-                    visited[index] = true;
+                if self.votes.get(offset).copied().unwrap_or(0) < required {
+                    visited[offset] = true;
                     continue;
                 }
-                let (area, rect) = self.flood(&scores, &mut visited, x, y, threshold);
+                let (area, rect) = self.flood(&mut visited, x, y, required);
                 if area >= MINIMUM_BLOB_AREA {
                     blobs.push((area, rect));
                 }
@@ -184,27 +255,20 @@ impl LogoLocator {
             .map(|(_, rect)| rect)
     }
 
-    /// Mean edge strength divided by its standard deviation, per pixel.
-    fn steadiness_map(&self) -> Vec<f32> {
-        let n = self.frames as f32;
-        self.sum
-            .iter()
-            .zip(&self.sum_squares)
-            .map(|(&sum, &squares)| {
-                let mean = sum / n;
-                let variance = (squares / n - mean * mean).max(0.0);
-                // The epsilon keeps a perfectly steady edge from dividing by
-                // zero, and sets the scale at which "steady" stops mattering.
-                mean / (variance.sqrt() + 1.0)
-            })
-            .collect()
-    }
-
-    /// Whether a region's shape is consistent with a logo rather than scenery.
+    /// Whether a region's shape and position are consistent with a logo.
     fn is_logo_shaped(&self, rect: Rect) -> bool {
-        let max_width = (self.width as f32 * MAXIMUM_EXTENT) as u32;
-        let max_height = (self.height as f32 * MAXIMUM_EXTENT) as u32;
-        rect.width <= max_width && rect.height <= max_height
+        let max_width = (self.width as f32 * MAXIMUM_WIDTH) as u32;
+        let max_height = (self.height as f32 * MAXIMUM_HEIGHT) as u32;
+        if rect.width > max_width || rect.height > max_height {
+            return false;
+        }
+
+        // Logos hug an edge. A candidate floating in from both sides is part
+        // of the picture, however steady it is.
+        let from_left = rect.x;
+        let from_right = self.width.saturating_sub(rect.x + rect.width);
+        let margin = self.width / 5;
+        from_left <= margin || from_right <= margin
     }
 
     /// Flood-fill a connected above-threshold region, returning its size and
@@ -214,11 +278,10 @@ impl LogoLocator {
     /// a large frame would otherwise be deep enough to overflow it.
     fn flood(
         &self,
-        scores: &[f32],
         visited: &mut [bool],
         start_x: u32,
         start_y: u32,
-        threshold: f32,
+        required: u16,
     ) -> (usize, Rect) {
         let mut stack = vec![(start_x, start_y)];
         let (mut min_x, mut max_x) = (start_x, start_x);
@@ -234,7 +297,7 @@ impl LogoLocator {
                 continue;
             }
             visited[index] = true;
-            if scores.get(index).copied().unwrap_or(0.0) < threshold {
+            if self.votes.get(index).copied().unwrap_or(0) < required {
                 continue;
             }
 
@@ -262,6 +325,30 @@ impl LogoLocator {
             },
         )
     }
+}
+
+/// Fraction of a chunk's peak steadiness a pixel must reach to earn a vote.
+const CHUNK_THRESHOLD: f32 = 0.45;
+
+/// Mean edge strength divided by its standard deviation, per pixel.
+///
+/// High where an edge is both strong and unchanging; low where the picture
+/// moves, and low where there is no edge at all.
+fn steadiness(sum: &[f32], sum_squares: &[f32], frames: u32) -> Vec<f32> {
+    let n = frames as f32;
+    if n <= 0.0 {
+        return vec![0.0; sum.len()];
+    }
+    sum.iter()
+        .zip(sum_squares)
+        .map(|(&total, &squares)| {
+            let mean = total / n;
+            let variance = (squares / n - mean * mean).max(0.0);
+            // The epsilon keeps a perfectly steady edge from dividing by zero,
+            // and sets the scale at which "steady" stops mattering.
+            mean / (variance.sqrt() + 1.0)
+        })
+        .collect()
 }
 
 /// Whether two rectangles are within `gap` pixels of each other.
@@ -375,21 +462,21 @@ mod tests {
         // connected blob would learn one glyph and miss the rest.
         let glyphs = [
             Rect {
-                x: 10,
+                x: 6,
                 y: 6,
-                width: 8,
+                width: 6,
                 height: 10,
             },
             Rect {
-                x: 22,
+                x: 15,
                 y: 6,
-                width: 8,
+                width: 6,
                 height: 10,
             },
             Rect {
-                x: 34,
+                x: 24,
                 y: 6,
-                width: 8,
+                width: 6,
                 height: 10,
             },
         ];
@@ -408,9 +495,9 @@ mod tests {
         }
 
         let found = locator.finish().expect("a logo region");
-        assert!(found.x <= 10, "should reach the first glyph: {found:?}");
+        assert!(found.x <= 6, "should reach the first glyph: {found:?}");
         assert!(
-            found.x + found.width >= 42,
+            found.x + found.width >= 30,
             "should reach the last glyph: {found:?}"
         );
         assert!(found.fits_within(W, H));

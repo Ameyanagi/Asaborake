@@ -173,8 +173,12 @@ pub fn run(
 
     // Keep a freshly learned logo, so the next recording on this channel skips
     // the learning passes entirely.
+    // A logo the detector then found nowhere is not a logo. Caching it would
+    // skip relearning on every future recording of this channel, entrenching
+    // the mistake.
     let mut logo_learned = false;
     if request.learn_logo
+        && analysis.has_logo()
         && let (Some(store), Some(logo)) = (store, analysis.learned_logo.as_ref())
     {
         match store.save(logo) {

@@ -128,12 +128,20 @@ impl PtsUnwrapper {
         // backwards than that is more plausibly a wrap than a real rewind.
         let half = MODULO_TICKS / 2;
         let delta = pts - last;
+
         if delta < -half {
             self.offset += MODULO_TICKS;
-        } else if delta > half {
-            // A jump forwards this large means the encoder restarted its
-            // clock; rebase so downstream timing stays continuous rather than
-            // gaining hours that were never recorded.
+        } else if delta > half || delta < -RESTART_TICKS {
+            // The timebase restarted. That happens forwards when an encoder
+            // resets its clock, and backwards whenever two separately encoded
+            // stretches end up in one file — which is what a recording of
+            // consecutive broadcast material is, and what happens across a
+            // long signal dropout.
+            //
+            // Either way the jump is not elapsed time, so it is cancelled out
+            // and the timeline continues from where it had reached. Without
+            // this a 150-second recording made of five segments reports the
+            // length of one of them.
             self.rebase -= delta;
         }
 
@@ -150,6 +158,13 @@ impl PtsUnwrapper {
 
 /// [`PTS_MODULO`] as signed ticks, for the unwrapper's arithmetic.
 const MODULO_TICKS: i64 = 1 << 33;
+
+/// A backwards step larger than this is a timebase restart, not reordering.
+///
+/// Timestamps are read in decode order, so B-frames make small backwards steps
+/// entirely normal — a couple of frames' worth. Ten seconds is far beyond any
+/// reordering window and far below any plausible content.
+const RESTART_TICKS: i64 = 10 * PTS_CLOCK_HZ.cast_signed();
 
 #[cfg(test)]
 mod tests {
@@ -206,6 +221,50 @@ mod tests {
         let after = unwrapper.push(0);
         assert_eq!(after, MODULO_TICKS);
         assert!((PtsUnwrapper::to_seconds(after - before_ticks) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_concatenated_recording_keeps_accumulating_time() {
+        // Five separately encoded 30-second stretches in one file, each
+        // starting its clock near zero — which is what a recording of
+        // consecutive broadcast material looks like.
+        let mut unwrapper = PtsUnwrapper::new();
+        let thirty_seconds = 30 * PTS_CLOCK_HZ;
+
+        let mut last = 0;
+        for _segment in 0..5 {
+            for tick in 0..=30 {
+                last = unwrapper.push(tick * PTS_CLOCK_HZ);
+            }
+            // The next segment restarts near zero.
+            let _ = thirty_seconds;
+        }
+
+        let total = PtsUnwrapper::to_seconds(last);
+        assert!(
+            (total - 150.0).abs() < 1.0,
+            "five 30-second segments should total 150s, got {total}s"
+        );
+    }
+
+    #[test]
+    fn small_backwards_steps_are_frame_reordering_not_a_restart() {
+        // Timestamps arrive in decode order, so B-frames legitimately step
+        // backwards by a frame or two.
+        let mut unwrapper = PtsUnwrapper::new();
+        let frame = PTS_CLOCK_HZ / 30;
+        let base = 90_000;
+
+        let a = unwrapper.push(base + 3 * frame);
+        let b = unwrapper.push(base + frame);
+        let c = unwrapper.push(base + 2 * frame);
+
+        assert!(b < a, "reordering must be preserved, not cancelled");
+        assert_eq!(
+            c - b,
+            i64::try_from(frame).unwrap_or(0),
+            "and the timeline must stay sane"
+        );
     }
 
     #[test]

@@ -257,8 +257,19 @@ pub fn analyse(
         on_progress,
     )?;
 
+    // The container's stated duration is unreliable: a recording made of
+    // consecutive broadcast segments reports the length of one of them,
+    // because each segment restarts its timebase. What was actually decoded is
+    // authoritative, and every cut point is expressed against it.
+    let decoded_seconds = detected.frames as f64 * seconds_per_frame;
+    let duration_seconds = if decoded_seconds > 0.0 {
+        decoded_seconds
+    } else {
+        duration
+    };
+
     Ok(Analysis {
-        duration_seconds: duration,
+        duration_seconds,
         seconds_per_frame,
         logo: detected.summary,
         learned_logo,
@@ -275,6 +286,9 @@ struct Detected {
     intervals: Vec<LogoInterval>,
     summary: Option<LogoSummary>,
     scene_changes: Vec<SceneChange>,
+    /// Frames actually decoded, which is what the true duration is derived
+    /// from.
+    frames: u64,
 }
 
 /// Score above which a bootstrap detector is taken to have seen the logo.
@@ -495,6 +509,7 @@ fn detect(
     let seconds_per_frame = reader.seconds_per_frame();
     let mut scene_detector = SceneDetector::new(seconds_per_frame);
     let mut scores = Vec::new();
+    let mut frames = 0u64;
 
     while let Some(frame) = reader.next_frame().map_err(Error::Media)? {
         if frame.index.is_multiple_of(128) {
@@ -503,6 +518,7 @@ fn detect(
                 fraction: fraction_of(frame.timestamp, duration),
             });
         }
+        frames += 1;
         scene_detector.add_frame(&frame);
         if let Some(detector) = detector.as_mut() {
             scores.push(detector.score(&frame));
@@ -519,6 +535,7 @@ fn detect(
             intervals: Vec::new(),
             summary,
             scene_changes,
+            frames,
         });
     }
 
@@ -532,6 +549,7 @@ fn detect(
         intervals,
         summary,
         scene_changes,
+        frames,
     })
 }
 

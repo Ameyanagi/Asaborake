@@ -172,17 +172,28 @@ fn filter_graph(request: &EncodeRequest<'_>, interlaced: bool) -> String {
 
     if request.is_cutting() {
         let ranges = select_expression(request.keep);
+
         // Selection happens after deinterlacing so the filter sees whole
-        // frames, and before scaling so no work is done on discarded frames.
-        video.insert(
-            usize::from(interlaced && request.profile.filters.deinterlace.is_some()),
-            format!("select='{ranges}'"),
-        );
-        // Renumber the surviving frames into a continuous timeline; without
-        // this the output keeps the source timestamps and every player sees a
-        // file full of gaps.
+        // frames, and before scaling so no work is done on frames that are
+        // about to be discarded.
+        let at = usize::from(interlaced && request.profile.filters.deinterlace.is_some());
+
+        // The timeline is rebuilt from the frame index *before* selecting, so
+        // that `t` here means the same thing it meant during analysis.
+        //
+        // The analysis derives every position by counting decoded frames, not
+        // by reading container timestamps. A source whose timestamps start at
+        // an offset — which broadcast recordings routinely do — would
+        // otherwise be cut a constant distance away from where the analysis
+        // asked. For a well-behaved constant-rate source this is a no-op.
+        video.insert(at, "setpts=N/FRAME_RATE/TB".to_owned());
+        video.insert(at + 1, format!("select='{ranges}'"));
+
+        // And renumber again afterwards, so what survives is contiguous rather
+        // than a timeline full of holes.
         video.push("setpts=N/FRAME_RATE/TB".to_owned());
 
+        audio.push("asetpts=N/SR/TB".to_owned());
         audio.push(format!("aselect='{ranges}'"));
         audio.push("asetpts=N/SR/TB".to_owned());
     }
@@ -325,8 +336,20 @@ mod tests {
             deinterlace < select && select < scale,
             "unexpected order in {graph}"
         );
-        assert!(graph.contains("setpts=N/FRAME_RATE/TB"), "{graph}");
-        assert!(graph.contains("asetpts=N/SR/TB"), "{graph}");
+
+        // The timeline must be rebuilt from the frame index before selecting,
+        // or the selection reads container timestamps that a concatenated
+        // recording restarts part-way through.
+        let normalise = graph
+            .find("setpts=N/FRAME_RATE/TB")
+            .expect("setpts present");
+        assert!(normalise < select, "setpts must precede select in {graph}");
+        assert_eq!(
+            graph.matches("setpts=N/FRAME_RATE/TB").count(),
+            2,
+            "once before the cut and once after: {graph}"
+        );
+        assert_eq!(graph.matches("asetpts=N/SR/TB").count(), 2, "{graph}");
     }
 
     #[test]
@@ -344,7 +367,10 @@ mod tests {
             },
         ];
         let graph = filter_graph(&request(&profile, &keep, &probe), false);
-        assert!(graph.starts_with("[0:v]select="), "{graph}");
+        assert!(
+            graph.starts_with("[0:v]setpts=N/FRAME_RATE/TB,select="),
+            "{graph}"
+        );
     }
 
     #[test]
