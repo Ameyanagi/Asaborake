@@ -331,6 +331,101 @@ const REFINEMENT_GATE: f32 = 0.25;
 /// same, for the same reason.
 ///
 /// A logo from the store skips all three.
+/// What a scan of one rectangle found, whether or not it was usable.
+///
+/// The failure cases carry their measurements. "No logo could be fitted" on
+/// its own tells an operator nothing they can act on: it cannot distinguish a
+/// box in the wrong place from a box in the right place over material that
+/// could never work, and those need opposite responses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScanReport {
+    /// Frames whose surroundings were flat enough to imply a background.
+    pub frames_used: u32,
+    /// Range of background brightnesses those frames covered, of 255.
+    pub background_spread: u8,
+    /// Mean opacity across the whole rectangle.
+    pub mean_alpha: f32,
+    /// Pixels opaque enough to match against.
+    pub strong_pixels: usize,
+    /// The fit itself, even when it was rejected — seeing it is what tells an
+    /// operator whether the box was aimed at the right thing.
+    pub logo: Option<LogoData>,
+}
+
+impl ScanReport {
+    /// What to tell an operator, in a sentence they can act on.
+    #[must_use]
+    pub fn explain(&self) -> String {
+        if self.frames_used < 50 {
+            return format!(
+                "only {} frames had a flat enough background to use. The box may be \
+                 overlapping busy picture — try tightening it around the logo, or pick \
+                 a recording with calmer material behind it.",
+                self.frames_used
+            );
+        }
+        if self.background_spread < 24 {
+            return format!(
+                "the background behind the box was always about the same brightness \
+                 (a range of {} of 255 across {} frames). Separating a translucent logo \
+                 from what is behind it means watching the background change underneath \
+                 it, so try a recording with more variety behind the logo.",
+                self.background_spread, self.frames_used
+            );
+        }
+        format!(
+            "a fit was made from {} frames, but only {} pixels came out opaque enough to \
+             match against (mean opacity {:.3}). That usually means the box is not over \
+             the logo, or the logo is too faint to separate. Check the preview.",
+            self.frames_used, self.strong_pixels, self.mean_alpha
+        )
+    }
+}
+
+/// Scan a rectangle and report what was found, usable or not.
+///
+/// One pass, and no plausibility bar: this exists to explain a failure, so it
+/// must produce the rejected fit rather than hiding it.
+///
+/// # Errors
+/// Returns [`Error::Media`] when the recording cannot be decoded.
+pub fn scan_rect(
+    ffmpeg: &Ffmpeg,
+    input: &Path,
+    rect: Rect,
+    options: &AnalysisOptions,
+    on_progress: &mut dyn FnMut(AnalysisProgress),
+) -> Result<ScanReport, Error> {
+    let probe = asaborake_media::probe(ffmpeg, input).map_err(Error::Media)?;
+    let duration = probe.duration_seconds.unwrap_or(0.0);
+    let Some(video) = probe.video.as_ref() else {
+        return Err(Error::Media(asaborake_media::Error::NoVideoStream {
+            path: input.to_path_buf(),
+        }));
+    };
+
+    let mut scanner = LogoScanner::new(rect, logo::DEFAULT_FLATNESS_THRESHOLD);
+    let mut reader = open_reader(ffmpeg, input, &probe, options, options.learn_step)?;
+    while let Some(frame) = reader.next_frame().map_err(Error::Media)? {
+        report(&frame, Stage::LearningLogo, duration, on_progress);
+        scanner.add_frame(&frame);
+    }
+
+    let logo = scanner.finish_bootstrap(
+        options.logo_name.clone(),
+        options.channel_id.clone(),
+        (video.width, video.height),
+    );
+
+    Ok(ScanReport {
+        frames_used: scanner.frames_accepted(),
+        background_spread: scanner.background_spread(),
+        mean_alpha: logo.as_ref().map_or(0.0, LogoData::mean_alpha),
+        strong_pixels: logo.as_ref().map_or(0, LogoData::strong_pixels),
+        logo,
+    })
+}
+
 /// Learn a logo from one recording, using a rectangle an operator drew.
 ///
 /// This is the logo tool's whole engine side. Automatic location is a fallback

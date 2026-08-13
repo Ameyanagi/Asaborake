@@ -297,19 +297,49 @@ export function LogoPicker({ onLearned }: { onLearned: () => void }) {
 function Outcome({ result }: { result: ScanResult }) {
   if (!result.learned) {
     return (
-      <div className="mt-5 border-l-2 border-alert bg-panel px-4 py-3">
-        <div className="eyebrow" style={{ color: "var(--color-alert)" }}>
-          nothing learned
+      <div className="mt-5 flex flex-wrap items-start gap-6 border-l-2 border-alert bg-panel px-4 py-3">
+        {/* The rejected fit. A recognisable logo that missed the bar and a
+            rectangle full of noise look nothing alike, and no number conveys
+            the difference as fast as seeing it does. */}
+        <div
+          className="flex h-20 w-36 shrink-0 items-center justify-center border border-rule"
+          style={{
+            backgroundImage:
+              "linear-gradient(45deg, #1a2430 25%, transparent 25%), linear-gradient(-45deg, #1a2430 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #1a2430 75%), linear-gradient(-45deg, transparent 75%, #1a2430 75%)",
+            backgroundSize: "8px 8px",
+            backgroundPosition: "0 0, 0 4px, 4px -4px, -4px 0px",
+          }}
+        >
+          {result.preview ? (
+            <img
+              src={result.preview}
+              alt="What the box caught, which was rejected"
+              className="max-h-full max-w-full object-contain"
+            />
+          ) : (
+            <span className="eyebrow">nothing</span>
+          )}
         </div>
-        <p className="mt-1.5 max-w-2xl font-sans leading-relaxed text-ink">
-          {result.reason}
-        </p>
-        <p className="mt-2 max-w-2xl font-sans leading-relaxed text-ink-dim">
-          Try a recording where the picture behind the logo changes a lot — the
-          logo is separated from the background by watching the background move
-          underneath it, so a static or very dark scene gives it nothing to work
-          with.
-        </p>
+
+        <div className="min-w-0 flex-1">
+          <div className="eyebrow" style={{ color: "var(--color-alert)" }}>
+            nothing usable
+          </div>
+          <p className="mt-1.5 max-w-2xl font-sans leading-relaxed text-ink">
+            {result.reason}
+          </p>
+          <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 tabular-nums text-ink-dim">
+            <span>{result.frames_used} usable frames</span>
+            <span>background range {result.background_spread} of 255</span>
+            <span>{result.strong_pixels} solid pixels</span>
+            <span>mean opacity {result.mean_alpha.toFixed(3)}</span>
+          </div>
+          <p className="mt-2 max-w-2xl font-sans leading-relaxed text-ink-dim">
+            If the preview looks like your logo, the box is right and the bar
+            was too strict for this material. If it looks like nothing, the box
+            is in the wrong place.
+          </p>
+        </div>
       </div>
     );
   }

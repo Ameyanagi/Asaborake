@@ -18,6 +18,7 @@ import {
   type JobStatus,
 } from "../lib/api";
 import { Page, Empty, Failure } from "../components/shell";
+import { SubmitJob } from "../components/SubmitJob";
 
 export function Dashboard() {
   const [jobs, setJobs] = useState<Job[] | null>(null);
@@ -61,9 +62,14 @@ export function Dashboard() {
           : "connecting to the engine"
       }
       aside={
-        <div className="flex gap-6 tabular-nums">
+        <div className="flex items-center gap-6 tabular-nums">
           <Count value={running} label="running" lit={running > 0} />
           <Count value={queued} label="queued" />
+          <SubmitJob
+            onSubmitted={() => {
+              void api.listJobs().then(setJobs).catch(() => {});
+            }}
+          />
         </div>
       }
     >

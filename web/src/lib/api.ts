@@ -294,7 +294,16 @@ export interface SourceInfo {
 
 /** What came of scanning a rectangle. */
 export type ScanResult =
-  | { learned: false; reason: string }
+  | {
+      learned: false;
+      reason: string;
+      frames_used: number;
+      background_spread: number;
+      mean_alpha: number;
+      strong_pixels: number;
+      /** The rejected fit, so you can see what the box actually caught. */
+      preview: string | null;
+    }
   | {
       learned: true;
       name: string;

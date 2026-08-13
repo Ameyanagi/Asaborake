@@ -134,6 +134,18 @@ impl LogoScanner {
         self.frames
     }
 
+    /// The range of background brightnesses the accepted frames covered.
+    ///
+    /// The single most useful number when a fit fails. Separating a
+    /// translucent logo from what is behind it means watching the background
+    /// change underneath it; if every usable frame had the same background,
+    /// there is one point and no line, and no amount of extra frames helps.
+    #[must_use]
+    pub fn background_spread(&self) -> u8 {
+        self.brightest_background
+            .saturating_sub(self.darkest_background)
+    }
+
     /// Offer a frame; returns whether its background was flat enough to use.
     pub fn add_frame(&mut self, frame: &Frame<'_>) -> bool {
         // A degenerate rectangle would underflow when the border is walked,

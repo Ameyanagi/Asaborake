@@ -34,6 +34,25 @@ use crate::Error;
 /// Magic bytes at the head of an `.abl` file.
 const MAGIC: &[u8; 4] = b"ABL1";
 
+/// Opacity at which a pixel counts as part of the logo rather than noise.
+///
+/// Lowering this to 0.10 was tried, to admit the faint tv asahi watermark
+/// whose fit peaks at 0.17. It was put back: the fit that came in under the
+/// looser bar was a regular repeating pattern rather than the eight varied
+/// letters of the logo, so the bar was not what was keeping it out — the
+/// estimator was returning the wrong thing, and accepting it would have
+/// stored a bad logo and reused it on every recording from that channel.
+///
+/// The scan reports its numbers now, so a fit rejected here can be looked at
+/// rather than guessed about.
+pub const STRONG_ALPHA: f32 = 0.20;
+
+/// How many such pixels a real logo has.
+///
+/// A logo is a few hundred solid pixels in a mostly empty rectangle, so this
+/// sits far below what one produces and far above what noise does.
+pub const MINIMUM_STRONG_PIXELS: usize = 20;
+
 /// A rectangle within a frame, in pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rect {
@@ -209,6 +228,18 @@ impl LogoData {
         total / self.a.len() as f32
     }
 
+    /// How many pixels came out opaque enough to match against.
+    ///
+    /// A logo is a few hundred solid pixels in a mostly empty rectangle. A fit
+    /// spread thinly over the whole box, with none of it strong, is noise that
+    /// happens to have a slope.
+    #[must_use]
+    pub fn strong_pixels(&self) -> usize {
+        (0..self.a.len())
+            .filter(|&i| self.alpha_at(i) >= STRONG_ALPHA)
+            .count()
+    }
+
     /// Whether the fit produced something that looks like a real logo.
     ///
     /// A fit over frames that happened to be flat but carried no logo yields
@@ -217,16 +248,11 @@ impl LogoData {
     #[must_use]
     pub fn is_plausible(&self) -> bool {
         const MINIMUM_FRAMES: u32 = 50;
-        const MINIMUM_STRONG_PIXELS: usize = 20;
-        const STRONG_ALPHA: f32 = 0.2;
 
         if self.frames_used < MINIMUM_FRAMES || self.a.is_empty() {
             return false;
         }
-        let strong = (0..self.a.len())
-            .filter(|&i| self.alpha_at(i) >= STRONG_ALPHA)
-            .count();
-        strong >= MINIMUM_STRONG_PIXELS
+        self.strong_pixels() >= MINIMUM_STRONG_PIXELS
     }
 
     /// Render the logo as an RGBA image for the web UI.

@@ -541,26 +541,36 @@ async fn scan_logo(
 
     let learned = tokio::task::spawn_blocking(move || {
         let logo = asaborake_analyze::learn(&ffmpeg, &path, rect, &options, &mut |_| {})?;
-        Ok::<_, asaborake_analyze::Error>(match logo {
-            Some(logo) => {
-                store.save(&logo).ok();
-                Some(logo)
-            }
-            None => None,
-        })
+        if let Some(logo) = logo {
+            store.save(&logo).ok();
+            return Ok::<_, asaborake_analyze::Error>(Ok(logo));
+        }
+        // Nothing usable. Measure the same rectangle again without the
+        // plausibility bar, so the answer can say *why* rather than just no.
+        let report = asaborake_analyze::scan_rect(&ffmpeg, &path, rect, &options, &mut |_| {})?;
+        Ok(Err(report))
     })
     .await
     .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
     .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
 
-    let Some(logo) = learned else {
-        return Ok(Json(json!({
-            "learned": false,
-            // The likeliest cause by far, and the one the operator can act on:
-            // pick a recording where the background behind the logo changes.
-            "reason": "no logo could be fitted inside that rectangle — the background \
-                       behind it may never have varied enough to separate the two",
-        })));
+    let logo = match learned {
+        Ok(logo) => logo,
+        Err(report) => {
+            return Ok(Json(json!({
+                "learned": false,
+                "reason": report.explain(),
+                "frames_used": report.frames_used,
+                "background_spread": report.background_spread,
+                "mean_alpha": report.mean_alpha,
+                "strong_pixels": report.strong_pixels,
+                // The rejected fit, so an operator can see whether the box was
+                // aimed at the right thing. A recognisable logo that failed the
+                // bar and a rectangle full of noise look nothing alike, and no
+                // number conveys the difference as fast as the picture does.
+                "preview": report.logo.as_ref().and_then(preview_data_uri),
+            })));
+        }
     };
 
     Ok(Json(json!({
