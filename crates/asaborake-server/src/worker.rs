@@ -1,0 +1,311 @@
+//! The worker pool.
+//!
+//! A job is minutes to hours of CPU and GPU work driving child processes, so
+//! each one runs on a blocking thread rather than on the async runtime. The
+//! async side does nothing but hand out work, record progress, and publish
+//! updates; that keeps the API responsive while several encodes are in flight.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use asaborake_core::{JobRequest, LogoStore};
+use asaborake_media::Ffmpeg;
+use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
+
+use crate::db::{Job, JobStatus, Store};
+use crate::{Config, Error};
+
+/// How often an idle worker looks for something to do.
+///
+/// Submissions also wake the pool directly, so this only bounds how long a job
+/// can sit unnoticed if that notification is missed.
+const IDLE_POLL: Duration = Duration::from_secs(2);
+
+/// Something worth telling connected clients about.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Update {
+    /// A job's progress or status changed.
+    Job {
+        /// The job, in full.
+        job: Box<Job>,
+    },
+    /// A job logged a line.
+    Log {
+        /// Which job.
+        job_id: String,
+        /// The line.
+        message: String,
+    },
+}
+
+/// Publishes updates to everything watching.
+#[derive(Debug, Clone)]
+pub struct Events {
+    sender: broadcast::Sender<Update>,
+}
+
+impl Events {
+    /// Create a channel with room for a reasonable backlog.
+    #[must_use]
+    pub fn new() -> Self {
+        // A slow client falls behind and is told so, rather than holding the
+        // worker up: progress is a stream of snapshots, and missing some is
+        // harmless because the next one supersedes them.
+        let (sender, _) = broadcast::channel(512);
+        Self { sender }
+    }
+
+    /// Subscribe to the stream.
+    #[must_use]
+    pub fn subscribe(&self) -> broadcast::Receiver<Update> {
+        self.sender.subscribe()
+    }
+
+    /// Publish an update, ignoring the absence of listeners.
+    pub fn publish(&self, update: Update) {
+        let _ = self.sender.send(update);
+    }
+}
+
+impl Default for Events {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Everything a worker needs.
+#[derive(Clone)]
+pub struct Context {
+    /// The job store.
+    pub store: Store,
+    /// The update channel.
+    pub events: Events,
+    /// The ffmpeg installation.
+    pub ffmpeg: Arc<Ffmpeg>,
+    /// The logo store, when one is configured.
+    pub logos: Option<Arc<LogoStore>>,
+    /// Server configuration.
+    pub config: Arc<Config>,
+    /// Signals workers to look for work now rather than at the next poll.
+    pub wake: Arc<tokio::sync::Notify>,
+}
+
+impl std::fmt::Debug for Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Context")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Start `count` workers, each running until cancelled.
+#[must_use]
+pub fn spawn_pool(context: &Context, count: usize) -> Vec<tokio::task::JoinHandle<()>> {
+    (0..count.max(1))
+        .map(|index| {
+            let context = context.clone();
+            tokio::spawn(async move {
+                tracing::debug!(worker = index, "worker started");
+                run_worker(context).await;
+            })
+        })
+        .collect()
+}
+
+/// Take jobs until the process ends.
+async fn run_worker(context: Context) {
+    loop {
+        match context.store.claim_next().await {
+            Ok(Some(job)) => {
+                let id = job.id.clone();
+                if let Err(error) = run_job(&context, job).await {
+                    tracing::error!(job = %id, %error, "job failed to run");
+                }
+            }
+            Ok(None) => {
+                // Nothing waiting. Sleep until something is submitted, or
+                // until the poll expires in case that signal was missed.
+                tokio::select! {
+                    () = context.wake.notified() => {}
+                    () = tokio::time::sleep(IDLE_POLL) => {}
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "could not claim a job");
+                tokio::time::sleep(IDLE_POLL).await;
+            }
+        }
+    }
+}
+
+/// Run one job to completion.
+async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
+    tracing::info!(job = %job.id, input = %job.input, "starting");
+    context.events.publish(Update::Job {
+        job: Box::new(job.clone()),
+    });
+    log(context, &job.id, "info", "starting").await;
+
+    let Some(profile) = asaborake_core::profile::builtin().remove(&job.profile) else {
+        let message = format!("no profile named '{}'", job.profile);
+        fail(context, &job, &message).await;
+        return Ok(());
+    };
+
+    let mut request = JobRequest::new(&job.input, &job.output, profile);
+    request.channel_id.clone_from(&job.channel_id);
+    request.channel_name.clone_from(&job.channel_name);
+    request.title.clone_from(&job.title);
+
+    // Progress arrives from a blocking thread and has to cross back to the
+    // async side to be recorded and published.
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<(f64, String)>(64);
+
+    let ffmpeg = Arc::clone(&context.ffmpeg);
+    let logos = context.logos.clone();
+    let worker = tokio::task::spawn_blocking(move || {
+        asaborake_core::run(&ffmpeg, logos.as_deref(), &request, &mut |progress| {
+            // A full channel means the recorder is behind; dropping the update
+            // is correct, because the next one supersedes it and the encode
+            // must not be held up by bookkeeping.
+            let _ = progress_tx.try_send((progress.fraction, progress.message.clone()));
+        })
+    });
+
+    let recorder = {
+        let context = context.clone();
+        let id = job.id.clone();
+        tokio::spawn(async move {
+            let mut last_message = String::new();
+            while let Some((fraction, message)) = progress_rx.recv().await {
+                let _ = context.store.set_progress(&id, fraction, &message).await;
+                if message != last_message {
+                    log(&context, &id, "info", &message).await;
+                    last_message = message.clone();
+                }
+                if let Ok(Some(job)) = context.store.get(&id).await {
+                    context.events.publish(Update::Job { job: Box::new(job) });
+                }
+            }
+        })
+    };
+
+    let outcome = worker.await;
+    let _ = recorder.await;
+
+    // A cancellation that arrived mid-run is honoured even if the pipeline
+    // finished, because the output is not what the operator asked for.
+    if context.store.is_cancelled(&job.id).await.unwrap_or(false) {
+        log(context, &job.id, "warn", "cancelled").await;
+        publish(context, &job.id).await;
+        return Ok(());
+    }
+
+    match outcome {
+        Ok(Ok(result)) => {
+            let analysis = serde_json::to_string(&result.analysis).ok();
+            let plan = serde_json::to_string(&result.plan).ok();
+            context
+                .store
+                .finish(
+                    &job.id,
+                    JobStatus::Completed,
+                    None,
+                    analysis.as_deref(),
+                    plan.as_deref(),
+                )
+                .await?;
+            log(
+                context,
+                &job.id,
+                "info",
+                &format!(
+                    "done: removed {:.1}s, confidence {:.2}",
+                    result.plan.cut_seconds(),
+                    result.plan.confidence
+                ),
+            )
+            .await;
+        }
+        Ok(Err(error)) => fail(context, &job, &format!("{error:#}")).await,
+        // The blocking task itself failed, which means a panic in the
+        // pipeline. That is a defect, and the job must not look successful.
+        Err(error) => fail(context, &job, &format!("worker stopped: {error}")).await,
+    }
+
+    publish(context, &job.id).await;
+    Ok(())
+}
+
+/// Record a failure against a job.
+async fn fail(context: &Context, job: &Job, message: &str) {
+    tracing::error!(job = %job.id, message, "job failed");
+    let _ = context
+        .store
+        .finish(&job.id, JobStatus::Failed, Some(message), None, None)
+        .await;
+    log(context, &job.id, "error", message).await;
+}
+
+/// Append a log line and publish it.
+async fn log(context: &Context, id: &str, level: &str, message: &str) {
+    let _ = context.store.log(id, level, message).await;
+    context.events.publish(Update::Log {
+        job_id: id.to_owned(),
+        message: message.to_owned(),
+    });
+}
+
+/// Publish a job's current state.
+async fn publish(context: &Context, id: &str) {
+    if let Ok(Some(job)) = context.store.get(id).await {
+        context.events.publish(Update::Job { job: Box::new(job) });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dropped_update_does_not_block_the_publisher() {
+        let events = Events::new();
+        // No subscribers: publishing must be a no-op rather than an error.
+        events.publish(Update::Log {
+            job_id: "x".into(),
+            message: "hello".into(),
+        });
+    }
+
+    #[tokio::test]
+    async fn subscribers_receive_updates() {
+        let events = Events::new();
+        let mut receiver = events.subscribe();
+
+        events.publish(Update::Log {
+            job_id: "job-1".into(),
+            message: "encoding".into(),
+        });
+
+        let update = receiver.recv().await.expect("an update");
+        assert_eq!(
+            update,
+            Update::Log {
+                job_id: "job-1".into(),
+                message: "encoding".into()
+            }
+        );
+    }
+
+    #[test]
+    fn updates_serialise_with_a_discriminator_the_client_can_switch_on() {
+        let update = Update::Log {
+            job_id: "a".into(),
+            message: "b".into(),
+        };
+        let json = serde_json::to_string(&update).expect("serialises");
+        assert!(json.contains(r#""type":"log""#), "{json}");
+    }
+}

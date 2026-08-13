@@ -112,6 +112,19 @@ enum Command {
 
     /// List the available encoding profiles.
     Profiles,
+
+    /// Run the job server and its HTTP API.
+    Serve {
+        /// Configuration file. Defaults apply to anything it omits.
+        #[arg(short, long, env = "ASABORAKE_CONFIG")]
+        config: Option<PathBuf>,
+        /// Address to listen on, overriding the configuration.
+        #[arg(long)]
+        listen: Option<String>,
+        /// How many jobs to run at once, overriding the configuration.
+        #[arg(long)]
+        concurrency: Option<usize>,
+    },
 }
 
 /// Details about the recording that improve detection when they are known.
@@ -195,6 +208,11 @@ fn run(cli: &Cli) -> Result<()> {
             profiles();
             Ok(())
         }
+        Command::Serve {
+            config,
+            listen,
+            concurrency,
+        } => serve(cli, config.as_deref(), listen.as_deref(), *concurrency),
     }
 }
 
@@ -539,6 +557,46 @@ fn logo(cli: &Cli, command: &LogoCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn serve(
+    cli: &Cli,
+    config_path: Option<&Path>,
+    listen: Option<&str>,
+    concurrency: Option<usize>,
+) -> Result<()> {
+    let mut config = match config_path {
+        Some(path) => asaborake_server::Config::load(path)
+            .with_context(|| format!("reading {}", path.display()))?,
+        None => asaborake_server::Config::default(),
+    };
+
+    // Command-line arguments win over the file, which wins over the defaults.
+    if let Some(listen) = listen {
+        listen.clone_into(&mut config.listen);
+    }
+    if let Some(concurrency) = concurrency {
+        config.concurrency = concurrency;
+    }
+    if let Some(dir) = cli.logo_dir.as_ref() {
+        config.logo_dir.clone_from(dir);
+    }
+    if cli.ffmpeg.is_some() {
+        config.ffmpeg.clone_from(&cli.ffmpeg);
+    }
+    if cli.ffprobe.is_some() {
+        config.ffprobe.clone_from(&cli.ffprobe);
+    }
+
+    // The pipeline itself is synchronous and runs on blocking threads; the
+    // runtime exists for the API and the queue.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?;
+    runtime
+        .block_on(asaborake_server::serve(config))
+        .context("running the server")
 }
 
 fn profiles() {

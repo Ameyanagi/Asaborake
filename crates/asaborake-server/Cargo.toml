@@ -1,35 +1,36 @@
 [package]
-name = "asaborake-cli"
+name = "asaborake-server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Command-line interface for Asaborake"
+description = "Job queue and HTTP API for Asaborake"
 
 [lints]
 workspace = true
-
-[[bin]]
-name = "asaborake"
-path = "src/main.rs"
 
 [dependencies]
 asaborake-analyze = { workspace = true }
 asaborake-cmcut = { workspace = true }
 asaborake-core = { workspace = true }
 asaborake-media = { workspace = true }
-asaborake-server = { workspace = true }
-asaborake-ts = { workspace = true }
 
-anyhow = { workspace = true }
-clap = { workspace = true }
+async-stream = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+image = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tracing = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
-tracing-subscriber = { workspace = true }
+toml = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
