@@ -589,12 +589,34 @@ fn confidence_of(segments: &[Segment], logo_available: bool) -> f64 {
     if total <= 0.0 {
         return 0.0;
     }
-    commercials
+    let weighted = commercials
         .iter()
         .map(|s| s.confidence * s.duration())
         .sum::<f64>()
-        / total
+        / total;
+
+    if logo_available {
+        return weighted;
+    }
+
+    // Without a logo the evidence is timing and boundaries alone. That is
+    // enough to *propose* a segmentation — and on a real recording it produces
+    // blocks that land on the fifteen-second grid convincingly — but it is not
+    // enough to remove material irreversibly, because nothing in it
+    // distinguishes a commercial break from a scene change that happens to sit
+    // on the grid between two silences.
+    //
+    // So it is capped below any sensible threshold. The plan is still
+    // computed, still shown, and still written as chapters; an operator who
+    // wants it applied anyway sets the policy to cut.
+    weighted.min(LOGO_FREE_CONFIDENCE_CEILING)
 }
+
+/// The most a plan with no logo evidence behind it may claim.
+///
+/// Below any sensible value of [`CutOptions::confidence_threshold`], so the
+/// low-confidence policy always governs the logo-free case.
+pub const LOGO_FREE_CONFIDENCE_CEILING: f64 = 0.5;
 
 /// Apply the low-confidence policy.
 fn decide(
@@ -846,6 +868,47 @@ mod tests {
         );
         assert_eq!(plan.keep.len(), 1);
         assert!((plan.kept_seconds() - 1800.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_convincing_logo_free_plan_still_will_not_cut_on_its_own() {
+        // Observed on a real twenty-minute recording made during an emergency
+        // broadcast, where no logo could be found: the segmenter produced
+        // twelve blocks, every one an exact multiple of fifteen seconds, and
+        // the duration-weighted confidence came out just above the threshold.
+        //
+        // It is a plausible reading. It is not evidence enough to delete a
+        // fifth of somebody's recording, because nothing in timing alone
+        // separates a commercial break from a scene change that happens to
+        // fall on the grid between two silences.
+        let breaks: Vec<(f64, f64)> = (0..12)
+            .map(|i| {
+                let start = 90.0 + f64::from(i) * 150.0;
+                (start, start + 60.0)
+            })
+            .collect();
+        let analysis = broadcast(1900.0, &breaks, false);
+
+        let plan = plan(&analysis, &CutOptions::default());
+        assert!(
+            plan.confidence <= LOGO_FREE_CONFIDENCE_CEILING,
+            "logo-free confidence must stay capped, got {}",
+            plan.confidence
+        );
+        assert_eq!(
+            plan.decision,
+            Decision::KeepAll,
+            "reason: {} confidence: {}",
+            plan.reason,
+            plan.confidence
+        );
+        // The plan itself survives, so it can be shown and written as chapters.
+        assert!(
+            plan.segments
+                .iter()
+                .any(|s| s.kind == SegmentKind::Commercial),
+            "the reading is still reported, just not applied"
+        );
     }
 
     #[test]

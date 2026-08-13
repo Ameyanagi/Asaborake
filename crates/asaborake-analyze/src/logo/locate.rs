@@ -21,6 +21,27 @@
 //! one stretch and gone. So the recording is divided into chunks, each scored
 //! separately, and a pixel counts as logo-like only if it stands out in the
 //! majority of them.
+//!
+//! # Frozen graphics, and why steadiness alone is a trap
+//!
+//! Steadiness of edge strength, on its own, does not describe a logo — it
+//! describes anything opaque that never moves, and scores such a thing
+//! *higher* than a real logo. A logo is translucent, so its edges fluctuate as
+//! the picture changes underneath; a burned-in graphic's edges do not fluctuate
+//! at all, and win.
+//!
+//! Japanese broadcast makes this concrete and common. During a weather or
+//! earthquake warning the picture is inset and a banner runs down one edge with
+//! a ticker along the bottom — the L-shaped layout, L字. That banner is opaque,
+//! static, high-contrast and present for the whole recording, and by the
+//! steadiness measure alone it is the most logo-like thing on screen.
+//!
+//! The property that separates them is the one the whole logo model rests on:
+//! **a logo is translucent**. The picture shows through it, so its pixels vary
+//! over time. A frozen graphic's pixels do not. So a pixel must also be *alive*
+//! — its luma must actually vary across the recording — before it can be part
+//! of a logo. That rules out the banner, the inset border, and any other
+//! burned-in furniture, without needing to recognise what they are.
 
 use std::collections::VecDeque;
 
@@ -71,6 +92,30 @@ const FRAMES_PER_CHUNK: u32 = 60;
 /// recording. A static interlude is present for one stretch of it.
 const REQUIRED_CHUNK_SHARE: f32 = 0.5;
 
+/// How much the picture must vary, in levels, for a region to be live.
+///
+/// Measured over a neighbourhood rather than a single pixel. Per-pixel
+/// liveness does not separate the two cases: a *static* graphic is re-encoded
+/// every GOP, and the mosquito noise around the edges of its lettering — which
+/// is exactly where the locator looks — varies by several levels on its own.
+///
+/// A neighbourhood is unambiguous, provided it is judged by its *quietest*
+/// pixel rather than its average. A logo sits over live video, so everything
+/// near it moves, whatever the logo's own opacity. A banner is frozen through
+/// and through — and taking the average instead would let its outer edge pass,
+/// because that window reaches into the live picture beside it.
+const MINIMUM_REGION_LIVENESS: f32 = 8.0;
+
+/// Side of the neighbourhood liveness is averaged over, as a fraction of the
+/// frame width.
+///
+/// Scaled to the picture rather than fixed, because the things being told
+/// apart scale with it: a thirtieth of the width is comfortably larger than a
+/// logo, so the window always takes in the picture around one, and comfortably
+/// smaller than an emergency banner, so a window inside one sees nothing but
+/// banner. At 1440 that is 48 pixels.
+const LIVENESS_WINDOW_FRACTION: u32 = 30;
+
 /// Accumulates the evidence needed to locate a logo.
 #[derive(Debug)]
 pub struct LogoLocator {
@@ -87,6 +132,14 @@ pub struct LogoLocator {
     /// One counter per pixel rather than one steadiness map per chunk, so the
     /// memory does not grow with the length of the recording.
     votes: Vec<u16>,
+    /// Running sum of raw luma per pixel, over the whole recording.
+    luma_sum: Vec<f32>,
+    /// Running sum of squared raw luma, for the same.
+    ///
+    /// Kept across the whole recording rather than per chunk: the question is
+    /// whether the picture ever moves under this pixel, and a long static shot
+    /// inside an otherwise live recording should not condemn it.
+    luma_squares: Vec<f32>,
     /// Chunks completed so far.
     chunks: u16,
     frames: u32,
@@ -112,6 +165,8 @@ impl LogoLocator {
             sum_squares: vec![0.0; count],
             chunk_frames: 0,
             votes: vec![0; count],
+            luma_sum: vec![0.0; count],
+            luma_squares: vec![0.0; count],
             chunks: 0,
             frames: 0,
             rows,
@@ -144,6 +199,17 @@ impl LogoLocator {
                     *sum += strength;
                     *squares += strength * strength;
                 }
+
+                // Whether the picture moves under this pixel at all, which is
+                // what separates a translucent logo from a frozen graphic.
+                let luma = f32::from(frame.pixel(x, y).unwrap_or(0));
+                if let (Some(sum), Some(squares)) = (
+                    self.luma_sum.get_mut(offset),
+                    self.luma_squares.get_mut(offset),
+                ) {
+                    *sum += luma;
+                    *squares += luma * luma;
+                }
             }
         }
 
@@ -159,7 +225,20 @@ impl LogoLocator {
         if self.chunk_frames == 0 || self.chunks == u16::MAX {
             return;
         }
-        let scores = steadiness(&self.sum, &self.sum_squares, self.chunk_frames);
+        let mut scores = steadiness(&self.sum, &self.sum_squares, self.chunk_frames);
+
+        // Frozen pixels are taken out of the competition before the threshold
+        // is set, not merely filtered from the winners. A burned-in graphic's
+        // steadiness is unbeatable — its edges never fluctuate at all — so
+        // leaving it in raises the bar above anything a real, translucent logo
+        // can reach, and the logo gets no votes in any chunk.
+        let liveness = self.liveness_map();
+        for (score, &alive) in scores.iter_mut().zip(&liveness) {
+            if alive < MINIMUM_REGION_LIVENESS {
+                *score = 0.0;
+            }
+        }
+
         let peak = scores.iter().copied().fold(0.0f32, f32::max);
 
         if peak > 0.0 {
@@ -195,6 +274,13 @@ impl LogoLocator {
         // overwhelmingly in its own chunks and not at all in the rest.
         let required = ((f32::from(self.chunks) * REQUIRED_CHUNK_SHARE).ceil() as u16).max(1);
 
+        // A logo is translucent, so the picture moves under it. Anything
+        // frozen — an emergency banner, an inset border, a burned-in caption
+        // bar — is not a logo however steady it is, and steadiness alone would
+        // rank it above the real thing.
+        let liveness = self.liveness_map();
+        let mut rejected_frozen = 0usize;
+
         let mut blobs: Vec<(usize, Rect)> = Vec::new();
         let mut visited = vec![false; self.votes.len()];
         for index in 0..self.rows.len() {
@@ -210,11 +296,26 @@ impl LogoLocator {
                     visited[offset] = true;
                     continue;
                 }
-                let (area, rect) = self.flood(&mut visited, x, y, required);
+                if liveness.get(offset).copied().unwrap_or(0.0) < MINIMUM_REGION_LIVENESS {
+                    visited[offset] = true;
+                    rejected_frozen += 1;
+                    continue;
+                }
+                let (area, rect) = self.flood(&mut visited, &liveness, x, y, required);
                 if area >= MINIMUM_BLOB_AREA {
                     blobs.push((area, rect));
                 }
             }
+        }
+
+        if rejected_frozen > 0 {
+            // Worth saying out loud: on a recording made during an emergency
+            // broadcast this is most of the picture's furniture, and explains
+            // why the logo was found where it was — or not found at all.
+            tracing::debug!(
+                pixels = rejected_frozen,
+                "ignored frozen graphics; the picture does not move under them"
+            );
         }
 
         let cluster = self.best_cluster(&blobs)?;
@@ -222,6 +323,77 @@ impl LogoLocator {
         // The scanner needs a border of clean background around the logo to
         // read the background colour from, so the region is grown a little.
         Some(cluster.expanded(4, self.width, self.height))
+    }
+
+    /// How much the quietest part of each pixel's neighbourhood varies.
+    ///
+    /// Per-pixel variation first, then eroded over a neighbourhood. The
+    /// erosion is what makes this usable: a static graphic's own lettering
+    /// carries enough compression noise to look alive pixel by pixel, and its
+    /// outer edge would pass any test that averaged in the live picture
+    /// alongside. Requiring the whole neighbourhood to be alive admits only
+    /// pixels genuinely surrounded by moving picture.
+    fn liveness_map(&self) -> Vec<f32> {
+        let n = self.frames as f32;
+        if n <= 0.0 {
+            return vec![0.0; self.luma_sum.len()];
+        }
+
+        let per_pixel: Vec<f32> = self
+            .luma_sum
+            .iter()
+            .zip(&self.luma_squares)
+            .map(|(&sum, &squares)| {
+                let mean = sum / n;
+                (squares / n - mean * mean).max(0.0).sqrt()
+            })
+            .collect();
+
+        self.erode(&per_pixel)
+    }
+
+    /// Minimum of `values` over a square neighbourhood, computed separably.
+    ///
+    /// Two one-dimensional passes rather than one two-dimensional one, so the
+    /// cost does not grow with the window's area.
+    fn erode(&self, values: &[f32]) -> Vec<f32> {
+        let radius = ((self.width / LIVENESS_WINDOW_FRACTION) / 2).max(2);
+        let (width, height) = (self.width as usize, self.height as usize);
+        let mut horizontal = vec![0.0f32; values.len()];
+
+        for y in 0..height {
+            let row = y * width;
+            for x in 0..width {
+                let from = x.saturating_sub(radius as usize);
+                let to = (x + radius as usize + 1).min(width);
+                let slice = values.get(row + from..row + to).unwrap_or_default();
+                if !slice.is_empty()
+                    && let Some(slot) = horizontal.get_mut(row + x)
+                {
+                    *slot = slice.iter().copied().fold(f32::INFINITY, f32::min);
+                }
+            }
+        }
+
+        let mut out = vec![0.0f32; values.len()];
+        for x in 0..width {
+            for y in 0..height {
+                let from = y.saturating_sub(radius as usize);
+                let to = (y + radius as usize + 1).min(height);
+                let mut lowest = f32::INFINITY;
+                for row in from..to {
+                    if let Some(&value) = horizontal.get(row * width + x) {
+                        lowest = lowest.min(value);
+                    }
+                }
+                if lowest.is_finite()
+                    && let Some(slot) = out.get_mut(y * width + x)
+                {
+                    *slot = lowest;
+                }
+            }
+        }
+        out
     }
 
     /// Group nearby blobs and return the bounding box of the strongest group.
@@ -279,6 +451,7 @@ impl LogoLocator {
     fn flood(
         &self,
         visited: &mut [bool],
+        liveness: &[f32],
         start_x: u32,
         start_y: u32,
         required: u16,
@@ -297,7 +470,9 @@ impl LogoLocator {
                 continue;
             }
             visited[index] = true;
-            if self.votes.get(index).copied().unwrap_or(0) < required {
+            if self.votes.get(index).copied().unwrap_or(0) < required
+                || liveness.get(index).copied().unwrap_or(0.0) < MINIMUM_REGION_LIVENESS
+            {
                 continue;
             }
 
@@ -404,8 +579,12 @@ mod tests {
         }
     }
 
-    /// A frame of moving content, with an optional static bright box in the
+    /// A frame of moving content, with an optional translucent mark in the
     /// top-left corner standing in for a logo.
+    ///
+    /// The mark is half-opacity rather than solid, because that is what a
+    /// station logo is — and an opaque one would be indistinguishable from
+    /// burned-in furniture, which the locator deliberately refuses.
     fn content(step: u32, logo: Option<Rect>) -> Vec<u8> {
         let mut luma = vec![0u8; (W * H) as usize];
         // Vertical bars that scroll, so every pixel sees changing edges.
@@ -418,7 +597,9 @@ mod tests {
         if let Some(rect) = logo {
             for y in rect.y..rect.y + rect.height {
                 for x in rect.x..rect.x + rect.width {
-                    luma[(y * W + x) as usize] = 255;
+                    let index = (y * W + x) as usize;
+                    let under = u32::from(luma[index]);
+                    luma[index] = u32::midpoint(under, 255) as u8;
                 }
             }
         }
@@ -426,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn finds_a_static_box_amid_moving_content() {
+    fn finds_a_translucent_mark_amid_moving_content() {
         let logo = Rect {
             x: 10,
             y: 6,
@@ -487,7 +668,12 @@ mod tests {
             for rect in &glyphs {
                 for y in rect.y..rect.y + rect.height {
                     for x in rect.x..rect.x + rect.width {
-                        luma[(y * W + x) as usize] = 255;
+                        // Translucent, as a station mark is: the picture shows
+                        // through, which is what makes it a logo rather than
+                        // burned-in furniture.
+                        let index = (y * W + x) as usize;
+                        let under = u32::from(luma[index]);
+                        luma[index] = u32::midpoint(under, 255) as u8;
                     }
                 }
             }
@@ -501,6 +687,83 @@ mod tests {
             "should reach the last glyph: {found:?}"
         );
         assert!(found.fits_within(W, H));
+    }
+
+    #[test]
+    fn an_emergency_banner_does_not_beat_the_real_logo() {
+        // The L字 layout: an opaque warning banner frozen down the left edge,
+        // and a translucent station logo over live picture on the right.
+        //
+        // By steadiness alone the banner wins — its edges never fluctuate at
+        // all, while the logo's move as the picture changes under it. What
+        // separates them is that the logo is translucent, so the picture does
+        // move underneath.
+        let banner = Rect {
+            x: 2,
+            y: 2,
+            width: 14,
+            height: 20,
+        };
+        let logo = Rect {
+            x: 96,
+            y: 6,
+            width: 18,
+            height: 12,
+        };
+
+        let mut locator = LogoLocator::new(W, H);
+        for step in 0..200 {
+            let mut luma = content(step, None);
+
+            // The banner: identical in every frame, whatever is behind it.
+            for y in banner.y..banner.y + banner.height {
+                for x in banner.x..banner.x + banner.width {
+                    luma[(y * W + x) as usize] = if (x + y) % 3 == 0 { 235 } else { 30 };
+                }
+            }
+
+            // The logo: half opacity, so the moving picture shows through.
+            for y in logo.y..logo.y + logo.height {
+                for x in logo.x..logo.x + logo.width {
+                    let index = (y * W + x) as usize;
+                    let under = u32::from(luma[index]);
+                    luma[index] = u32::midpoint(under, 255) as u8;
+                }
+            }
+
+            locator.add_frame(&frame(&luma));
+        }
+
+        let found = locator.finish().expect("a logo region");
+        assert!(
+            found.x >= 80,
+            "picked the frozen banner instead of the logo: {found:?}"
+        );
+        assert!(
+            found.x <= logo.x && found.x + found.width >= logo.x + logo.width,
+            "should cover the logo: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_frozen_graphic_alone_yields_no_logo() {
+        // Nothing but burned-in furniture over moving content. There is no
+        // logo here, and inventing one would mis-cut every recording on the
+        // channel.
+        let mut locator = LogoLocator::new(W, H);
+        for step in 0..200 {
+            let mut luma = content(step, None);
+            for y in 2..24u32 {
+                for x in 2..18u32 {
+                    luma[(y * W + x) as usize] = if (x + y) % 3 == 0 { 235 } else { 30 };
+                }
+            }
+            locator.add_frame(&frame(&luma));
+        }
+        assert!(
+            locator.finish().is_none(),
+            "a frozen graphic is not a logo, however steady"
+        );
     }
 
     #[test]

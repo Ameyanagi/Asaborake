@@ -187,25 +187,37 @@ recordings routinely start at an offset.
 
 ## Known limits
 
-- **Emergency overlays (L字).** When a broadcaster is running a weather or
-  earthquake warning, the picture is inset and a banner runs down one edge with
-  a ticker along the bottom. That banner is high-contrast, never moves, and is
-  present throughout — which is precisely the definition the locator uses, so
-  it wins over the real logo. Worse, its border crosses live picture, so the
-  flatness test never passes and no logo is fitted at all.
+- **Occluded watermarks.** A Japanese variety programme carries permanent
+  telop banners in the corners, and they sit on top of the station watermark
+  for much of its length. A faint translucent mark under a bright caption is
+  not recoverable, and if it is covered for more than half the recording it
+  does not survive the chunk vote either.
 
-  Observed on two of three Tokyo commercial channels during a 大雨特別警報.
-  Asaborake behaves safely — no logo means low confidence means the recording
-  is kept whole — but it spends three decoding passes discovering that. There
-  is no guard for it yet.
+  Observed on a twenty-minute slice of a prime-time variety show: the
+  watermark is plainly visible in some frames and completely buried in
+  others, and no logo was learned.
+
+  The workaround is the one Amatsukaze users already follow: seed the logo
+  store from a programme with a clean corner — a news bulletin — and let the
+  variety recordings reuse it. `asaborake analyse --logo-dir …` on such a
+  recording is enough to populate it.
 
 - **Programme logos versus station logos.** The persistent corner mark on a
-  Japanese variety show is often the *programme's* logo rather than the
-  station's. It works just as well for detection — it is absent during
-  commercials either way — but the logo store is keyed by channel, so a
-  programme logo cached under a channel will not be found in the next
-  recording from it. The detector then reports no logo and the recording is
-  kept whole, which is safe but wasteful.
+  variety show is often the *programme's* logo rather than the station's. It
+  works just as well for detection — it is absent during commercials either
+  way — but the logo store is keyed by channel, so a programme logo cached
+  under a channel will not be found in the next recording from it. The
+  detector then reports no logo and the recording is kept whole, which is safe
+  but wasteful.
+
+- **Logo-free detection never cuts on its own.** Timing alone produces
+  surprisingly convincing plans — on a real recording it found twelve blocks,
+  every one an exact multiple of fifteen seconds — but nothing in timing
+  separates a commercial break from a scene change that happens to fall on the
+  grid between two silences. Confidence is therefore capped below any sensible
+  threshold when no logo was found, so the plan is reported and written as
+  chapters but not applied. Setting the low-confidence policy to `cut` applies
+  it anyway.
 
 - **HEVC geometry.** Format-change detection parses MPEG-2 sequence headers and
   H.264 SPS. A 4K HEVC service will not have its resolution changes noticed.
