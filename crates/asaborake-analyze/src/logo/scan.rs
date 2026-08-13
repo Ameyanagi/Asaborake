@@ -102,6 +102,8 @@ pub struct LogoScanner {
     /// Range of background levels seen, to check the fit is identifiable.
     darkest_background: u8,
     brightest_background: u8,
+    /// Whether the border must be flat end to end, or merely mostly flat.
+    strict: bool,
     /// Reusable buffer for the border samples, to keep the hot loop allocation
     /// free across tens of thousands of frames.
     border: Vec<u8>,
@@ -118,7 +120,30 @@ impl LogoScanner {
             frames: 0,
             darkest_background: u8::MAX,
             brightest_background: u8::MIN,
+            strict: false,
             border: Vec::new(),
+        }
+    }
+
+    /// Start scanning a rectangle somebody drew, judging the border end to end.
+    ///
+    /// Amatsukaze rejects a frame unless its border runs min-to-max within the
+    /// threshold, and for a box drawn round a logo that is right: the border is
+    /// a thin ring of genuine background, and a single stray bright pixel means
+    /// something has moved into it.
+    ///
+    /// The tolerant test below exists for the automatic locator, whose
+    /// rectangle is the bounding box of everything steady near the logo and can
+    /// be hundreds of pixels a side. Applying that tolerance to a hand-drawn box
+    /// lets through frames where a fifth of the border is a different colour
+    /// entirely, and the background it then infers is a mixture rather than a
+    /// colour — which is how a fit over a thousand frames comes back as
+    /// structured noise instead of a logo.
+    #[must_use]
+    pub fn strict(rect: Rect, flatness_threshold: u8) -> Self {
+        Self {
+            strict: true,
+            ..Self::new(rect, flatness_threshold)
         }
     }
 
@@ -217,8 +242,14 @@ impl LogoScanner {
         //
         // The tenth and ninetieth percentiles tolerate that while still
         // requiring the border to be genuinely one colour.
-        let low = percentile(&self.border, 0.10)?;
-        let high = percentile(&self.border, 0.90)?;
+        let (low, high) = if self.strict {
+            (self.border.first().copied()?, self.border.last().copied()?)
+        } else {
+            (
+                percentile(&self.border, 0.10)?,
+                percentile(&self.border, 0.90)?,
+            )
+        };
         if high.saturating_sub(low) > self.flatness_threshold {
             return None;
         }

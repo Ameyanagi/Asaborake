@@ -15,6 +15,7 @@ workspace = true
 asaborake-analyze = { workspace = true }
 asaborake-cmcut = { workspace = true }
 asaborake-core = { workspace = true }
+asaborake-ts = { workspace = true }
 asaborake-media = { workspace = true }
 
 async-stream = { workspace = true }

@@ -404,7 +404,9 @@ pub fn scan_rect(
         }));
     };
 
-    let mut scanner = LogoScanner::new(rect, logo::DEFAULT_FLATNESS_THRESHOLD);
+    // A rectangle that reached here was drawn by somebody looking at the
+    // picture, so its border is genuine background and is judged end to end.
+    let mut scanner = LogoScanner::strict(rect, logo::DEFAULT_FLATNESS_THRESHOLD);
     let mut reader = open_reader(ffmpeg, input, &probe, options, options.learn_step)?;
     while let Some(frame) = reader.next_frame().map_err(Error::Media)? {
         report(&frame, Stage::LearningLogo, duration, on_progress);
@@ -607,7 +609,14 @@ fn scan_pass(
     };
 
     let is_bootstrap = gate.is_none();
-    let mut scanner = LogoScanner::new(rect, logo::DEFAULT_FLATNESS_THRESHOLD);
+    // A rectangle the operator supplied is a tight box round the logo and its
+    // border is real background; one the locator inferred is a loose bounding
+    // box whose border cannot be held to the same standard.
+    let mut scanner = if options.logo_rect.is_some() {
+        LogoScanner::strict(rect, logo::DEFAULT_FLATNESS_THRESHOLD)
+    } else {
+        LogoScanner::new(rect, logo::DEFAULT_FLATNESS_THRESHOLD)
+    };
     let mut reader = open_reader(ffmpeg, input, probe, options, options.learn_step)?;
 
     while let Some(frame) = reader.next_frame().map_err(Error::Media)? {

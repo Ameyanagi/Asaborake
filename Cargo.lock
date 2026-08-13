@@ -178,6 +178,7 @@ dependencies = [
  "asaborake-cmcut",
  "asaborake-core",
  "asaborake-media",
+ "asaborake-ts",
  "async-stream",
  "axum",
  "chrono",

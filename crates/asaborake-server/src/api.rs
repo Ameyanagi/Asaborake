@@ -4,6 +4,8 @@
 //! app is the only client, and everything it needs to render is either a list
 //! or a subscription.
 
+use std::io::Read as _;
+
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -413,7 +415,29 @@ async fn probe_recording(
         "height": video.height,
         "fps": video.fps(),
         "interlaced": video.interlaced,
+        "services": services_in(&query.path),
     })))
+}
+
+/// What the recording calls its own channel.
+///
+/// Read from the head of the file rather than the whole of it: the service
+/// table repeats every couple of seconds, so twenty megabytes is thousands of
+/// copies, and someone picking a recording in the logo tool is waiting.
+fn services_in(path: &str) -> Vec<asaborake_ts::ServiceInfo> {
+    /// Enough of the file to hold many repeats of every table.
+    const PREFIX: u64 = 20 * 1024 * 1024;
+
+    let Ok(file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    match asaborake_ts::scan(std::io::BufReader::new(file).take(PREFIX), PREFIX) {
+        Ok(info) => info.services,
+        Err(error) => {
+            tracing::debug!(%error, "could not read the services from this recording");
+            Vec::new()
+        }
+    }
 }
 
 /// Which frame of which recording to show.

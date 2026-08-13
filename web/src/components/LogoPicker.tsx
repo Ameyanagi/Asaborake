@@ -71,6 +71,15 @@ export function LogoPicker({ onLearned }: { onLearned: () => void }) {
         // start on a title card or the tail of the previous programme, and
         // the logo is often not up yet.
         setAt(Math.floor((info.duration_seconds ?? 0) / 4));
+
+        // The recording knows which channel it is, so nobody should have to
+        // type it. The first service is the one being recorded; the others
+        // are its sub-channels.
+        const service = info.services[0];
+        if (service) {
+          setChannelId(String(service.service_id));
+          if (service.name) setName(service.name);
+        }
       })
       .catch((cause: Error) => setError(cause.message));
   }, [path]);
@@ -187,7 +196,7 @@ export function LogoPicker({ onLearned }: { onLearned: () => void }) {
           <input
             value={channelId}
             onChange={(event) => setChannelId(event.target.value)}
-            placeholder="as EPGStation sends it"
+            placeholder="read from the recording"
             className="w-56 border border-rule-bright bg-panel px-3 py-1.5 text-ink placeholder:text-ink-faint"
           />
         </label>
@@ -202,6 +211,15 @@ export function LogoPicker({ onLearned }: { onLearned: () => void }) {
           />
         </label>
       </div>
+
+      {source && source.services.length > 1 && (
+        <p className="mb-5 font-sans text-ink-dim">
+          This recording carries{" "}
+          {source.services.map((s) => `${s.name || s.service_id}`).join(", ")}.
+          The first is the one being recorded; change the channel id above if it
+          is not.
+        </p>
+      )}
 
       {recordings.length === 0 && !error && (
         <p className="font-sans text-ink-dim">

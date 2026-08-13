@@ -290,6 +290,8 @@ export interface SourceInfo {
   height: number;
   fps: number;
   interlaced: boolean;
+  /** What the recording calls its own channels, read from the stream. */
+  services: { service_id: number; provider: string; name: string }[];
 }
 
 /** What came of scanning a rectangle. */
