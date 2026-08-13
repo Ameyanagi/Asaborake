@@ -98,7 +98,7 @@ export function Timeline({
         viewBox={`0 0 1000 ${HEIGHT}`}
         preserveAspectRatio="none"
         className="w-full"
-        style={{ height: `${HEIGHT * 2.2}px` }}
+        style={{ height: `${HEIGHT * 3}px` }}
         onMouseMove={onMove}
         onMouseLeave={() => setHover(null)}
         role="img"
@@ -128,7 +128,7 @@ export function Timeline({
                 x={x(mark.seconds) + 3}
                 y={12}
                 fill="var(--color-ink-faint)"
-                fontSize={8}
+                fontSize={9}
                 fontFamily="var(--font-mono)"
               >
                 {formatDuration(mark.seconds)}
@@ -276,7 +276,7 @@ export function Timeline({
 
 function Key({ colour, label }: { colour: string; label: string }) {
   return (
-    <span className="flex items-center gap-2 text-[11px] text-ink-dim">
+    <span className="flex items-center gap-2 text-[12px] text-ink-dim">
       <span
         className="inline-block h-2 w-4"
         style={{ background: colour }}

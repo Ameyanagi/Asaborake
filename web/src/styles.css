@@ -19,9 +19,13 @@
   --color-rule: #1e2a38;
   --color-rule-bright: #2b3b4d;
 
-  --color-ink: #c7d3e0;
-  --color-ink-dim: #6b7c90;
-  --color-ink-faint: #47576b;
+  /* Measured against the page ground: 14.2:1, 7.7:1 and 5.7:1. The first
+     palette put the dimmest two at 4.5:1 and 2.6:1 — the labels and log were
+     technically present and practically unreadable. Dark and quiet is the
+     intent; hard to read is not. */
+  --color-ink: #d5dfea;
+  --color-ink-dim: #95a6ba;
+  --color-ink-faint: #7d8ea3;
 
   /* Programme: what survives the cut. */
   --color-programme: #e3a55c;
@@ -51,14 +55,16 @@ body {
   background: var(--color-ground);
   color: var(--color-ink);
   font-family: var(--font-mono);
-  font-size: 13px;
+  /* Mono runs visually smaller than a proportional face at the same size, and
+     this is a screen read at a desk rather than a phone at arm's length. */
+  font-size: 14px;
   -webkit-font-smoothing: antialiased;
 }
 
 /* Channel-strip labels, as on hardware. */
 .eyebrow {
-  font-size: 10px;
-  letter-spacing: 0.18em;
+  font-size: 11px;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--color-ink-faint);
 }
