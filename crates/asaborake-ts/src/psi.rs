@@ -17,6 +17,12 @@ const TABLE_ID_EIT_PF: u8 = 0x4E;
 /// PID carrying the Event Information Table.
 pub const PID_EIT: u16 = 0x0012;
 
+/// Table id of the Service Description Table for this transport stream.
+const TABLE_ID_SDT: u8 = 0x42;
+
+/// PID carrying the Service Description Table.
+pub const PID_SDT: u16 = 0x0011;
+
 /// Reassembles PSI sections arriving on one PID.
 #[derive(Debug, Default)]
 pub struct SectionAssembler {
@@ -181,6 +187,85 @@ impl AudioComponent {
     pub const fn is_dual_mono(&self) -> bool {
         self.component_type == 0x02
     }
+}
+
+/// One service, as the recording names itself.
+///
+/// A recording knows what channel it is: the service id keys everything, and
+/// the name is what a person recognises. Making an operator type either of
+/// them in is asking them to copy out something the file already says, and to
+/// get it right.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ServiceInfo {
+    /// Service id, which is the same number the PAT calls the program number.
+    pub service_id: u16,
+    /// Broadcaster, e.g. 東京.
+    pub provider: String,
+    /// Channel name, e.g. テレビ朝日.
+    pub name: String,
+}
+
+/// Service Description Table: what the services in this stream are called.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Sdt {
+    /// Every service the section described.
+    pub services: Vec<ServiceInfo>,
+}
+
+impl Sdt {
+    /// Parse an SDT section for this transport stream.
+    ///
+    /// Returns `None` for the table describing *other* streams, which names
+    /// services this recording does not contain.
+    #[must_use]
+    pub fn parse(section: &[u8]) -> Option<Self> {
+        if section.first()? != &TABLE_ID_SDT {
+            return None;
+        }
+        let body = section_body(section)?;
+        // original_network_id and a reserved byte precede the service loop.
+        let mut data = body.get(3..)?;
+
+        let mut services = Vec::new();
+        while data.len() >= 5 {
+            let service_id = (u16::from(data[0]) << 8) | u16::from(data[1]);
+            let length = ((usize::from(data[3]) & 0x0F) << 8) | usize::from(data[4]);
+            let Some(descriptors) = data.get(5..5 + length) else {
+                break;
+            };
+            if let Some((provider, name)) = service_name(descriptors) {
+                services.push(ServiceInfo {
+                    service_id,
+                    provider,
+                    name,
+                });
+            }
+            data = data.get(5 + length..)?;
+        }
+        Some(Self { services })
+    }
+}
+
+/// Find the service descriptor (tag 0x48) and read the two names out of it.
+fn service_name(mut descriptors: &[u8]) -> Option<(String, String)> {
+    while descriptors.len() >= 2 {
+        let tag = descriptors[0];
+        let len = usize::from(descriptors[1]);
+        let body = descriptors.get(2..2 + len)?;
+        if tag == 0x48 {
+            // service_type, then two length-prefixed ARIB strings.
+            let provider_len = usize::from(*body.get(1)?);
+            let provider = body.get(2..2 + provider_len)?;
+            let name_len = usize::from(*body.get(2 + provider_len)?);
+            let name = body.get(3 + provider_len..3 + provider_len + name_len)?;
+            return Some((
+                crate::caption::decode_statement(provider),
+                crate::caption::decode_statement(name),
+            ));
+        }
+        descriptors = descriptors.get(2 + len..)?;
+    }
+    None
 }
 
 /// Program Map Table: the elementary streams making up one program.

@@ -37,6 +37,7 @@ pub use caption::{Caption, to_srt};
 pub use packet::{PacketLayout, TsPacket};
 pub use pes::{PesHeader, PtsUnwrapper};
 pub use psi::{AudioComponent, Eit, EsInfo, PID_EIT, Pat, Pmt, StreamKind};
+pub use psi::{PID_SDT, Sdt, ServiceInfo};
 pub use scan::{FormatChange, ProgramInfo, StreamInfo, TsInfo, TsStats, scan};
 pub use video::VideoFormat;
 

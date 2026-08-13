@@ -11,7 +11,9 @@ use std::io::Read;
 use crate::Error;
 use crate::packet::{ContinuityTracker, PID_NULL, PID_PAT, PacketLayout, TsPacket, detect_layout};
 use crate::pes::{PesHeader, PtsUnwrapper};
-use crate::psi::{AudioComponent, Eit, PID_EIT, Pat, Pmt, SectionAssembler, StreamKind};
+use crate::psi::{
+    AudioComponent, Eit, PID_EIT, PID_SDT, Pat, Pmt, Sdt, SectionAssembler, ServiceInfo, StreamKind,
+};
 use crate::video::{VideoFormat, parse_h264_sps, parse_mpeg2_sequence_header};
 
 /// Counters describing how healthy the recording is.
@@ -140,6 +142,11 @@ pub struct TsInfo {
     pub format_changes: Vec<FormatChange>,
     /// Health counters.
     pub stats: TsStats,
+    /// What the recording calls its own services, from the SDT.
+    ///
+    /// A recording knows which channel it is; nobody should have to type it.
+    #[serde(default)]
+    pub services: Vec<ServiceInfo>,
 }
 
 impl TsInfo {
@@ -264,6 +271,10 @@ struct ScanState {
     /// `pmt_pid` -> parsed PMT.
     pmts: BTreeMap<u16, Pmt>,
 
+    sdt_assembler: SectionAssembler,
+    /// `service_id` -> what the stream calls that service.
+    services: BTreeMap<u16, ServiceInfo>,
+
     eit_assembler: SectionAssembler,
     /// `service_id` -> what its present event says about its audio.
     audio_components: BTreeMap<u16, Vec<AudioComponent>>,
@@ -301,6 +312,8 @@ impl ScanState {
             pmt_assemblers: HashMap::new(),
             pat: BTreeMap::new(),
             pmts: BTreeMap::new(),
+            sdt_assembler: SectionAssembler::new(),
+            services: BTreeMap::new(),
             eit_assembler: SectionAssembler::new(),
             audio_components: BTreeMap::new(),
             video_pid: None,
@@ -338,6 +351,7 @@ impl ScanState {
         match packet.pid {
             PID_PAT => self.handle_pat(packet),
             PID_EIT => self.handle_eit(packet),
+            PID_SDT => self.handle_sdt(packet),
             pid if self.pat.values().any(|&p| p == pid) => self.handle_pmt(pid, packet),
             pid if Some(pid) == self.video_pid => self.handle_video(packet),
             _ => {}
@@ -368,6 +382,18 @@ impl ScanState {
             };
             if !eit.audio.is_empty() {
                 self.audio_components.insert(eit.service_id, eit.audio);
+            }
+        }
+    }
+
+    /// Read what the recording calls its own services.
+    fn handle_sdt(&mut self, packet: &TsPacket<'_>) {
+        for section in self.sdt_assembler.push(packet) {
+            let Some(sdt) = Sdt::parse(&section) else {
+                continue;
+            };
+            for service in sdt.services {
+                self.services.insert(service.service_id, service);
             }
         }
     }
@@ -517,6 +543,7 @@ impl ScanState {
             video_format: self.initial_format,
             format_changes: self.format_changes,
             stats: self.stats,
+            services: self.services.into_values().collect(),
         }
     }
 }

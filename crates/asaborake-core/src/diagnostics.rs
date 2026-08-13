@@ -279,6 +279,7 @@ mod tests {
             }),
             format_changes: Vec::new(),
             stats,
+            services: Vec::new(),
         }
     }
 
