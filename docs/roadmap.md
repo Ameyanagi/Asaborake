@@ -87,13 +87,17 @@ or so, M a few days, L a week or more.
 
 ### Stage 1 — stop losing things (highest value, least glamorous)
 
-1. **Keep every audio track, and copy rather than re-encode.** `-c:a copy`
-   when the source is AAC and no filtering is needed; map every audio stream
-   rather than `0:a:0`. Removes a whole class of quality loss and makes
-   encoding faster. **S**
-2. **Dual-mono handling.** Detect `AUDIO_2LANG` and split into two tracks
-   rather than downmixing. Asaborake already detects dual mono in `probe`; it
-   just does the wrong thing with it. **S**
+1. ~~**Keep every audio track, and copy rather than re-encode.**~~ **Done.**
+   Every stream is a track and carries its language; audio is copied byte for
+   byte whenever nothing is being cut. Amatsukaze goes further and reassembles
+   AAC frames losslessly *across* cuts, which needs frame-level muxing rather
+   than a filter graph and is not attempted.
+2. ~~**Dual-mono handling.**~~ **Done**, though not where the note expected to
+   find it. `probe`'s dual-mono guess was wrong: ARIB carries a bilingual
+   programme as one stream in "1/0 + 1/0 mode", which ffprobe cannot tell from
+   stereo. The signal is the audio component descriptor, and it lives in the
+   *event* table rather than the program map. Read from there, the stream is
+   split into two mono tracks tagged with their own languages.
 3. **ARIB captions to SRT and ASS.** The largest single functional gap. Needs a
    B24 decoder — either port one or shell out to an existing tool — plus
    re-timing across cut points, which Asaborake is well placed to do because it
@@ -101,9 +105,11 @@ or so, M a few days, L a week or more.
    handling can come later; unmapped glyphs render as a placeholder. **L**
 4. **Split output on format change.** `asaborake-ts` already reports the change
    points; act on them instead of logging them. **M**
-5. **Report what happened.** Audio drift statistics, error counters and stream
-   inventory in the job record, so a bad recording is visible rather than
-   silently mediocre. **S**
+5. ~~**Report what happened.**~~ **Done.** The stream inventory, drop and
+   scramble counters, and the sentences they imply are kept with the job —
+   recorded when it *starts*, so a job that fails still says what it was
+   working from. Audio drift statistics are still missing; they need a
+   PTS-versus-sample-count comparison the scan does not yet make.
 
 ### Stage 2 — make the logo workable (unblocks the core value)
 
