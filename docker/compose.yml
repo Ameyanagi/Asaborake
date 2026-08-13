@@ -1,0 +1,66 @@
+# Asaborake, standalone.
+#
+# Two services: the engine, which does the work, and the web UI, which is the
+# only thing that faces the network. To run Asaborake alongside an existing
+# EPGStation stack instead, see docs/epgstation.md — the engine joins that
+# stack and needs the same view of the recordings directory.
+
+services:
+  engine:
+    image: asaborake/engine:0.1.0
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.engine
+    container_name: asaborake-engine
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Tokyo
+      ASABORAKE_LOG: asaborake=info
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: video,utility,compute
+    volumes:
+      # The recordings, at the same path the engine will be told about. A job
+      # carries absolute paths, so this must match what EPGStation sees.
+      - /recordings:/recordings
+      # Learned logos and the job queue. Without this the queue is lost on
+      # restart and every channel's logo is relearned.
+      - asaborake-state:/var/lib/asaborake
+    # No published port: the engine has no authentication, and the web service
+    # reaches it over the compose network.
+    expose:
+      - "8081"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    logging:
+      driver: json-file
+      options:
+        max-file: "2"
+        max-size: 10m
+
+  web:
+    image: asaborake/web:0.1.0
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+    container_name: asaborake-web
+    restart: unless-stopped
+    depends_on:
+      - engine
+    environment:
+      TZ: Asia/Tokyo
+      ASABORAKE_ENGINE: http://engine:8081
+    ports:
+      - "3000:3000"
+    logging:
+      driver: json-file
+      options:
+        max-file: "2"
+        max-size: 10m
+
+volumes:
+  asaborake-state:

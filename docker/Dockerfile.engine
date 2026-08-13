@@ -1,0 +1,50 @@
+# The Asaborake engine.
+#
+# Built against a CUDA runtime image because the whole point of running this on
+# a recording box is that NVENC does the encoding while the CPU does the
+# analysis. The CPU profiles still work without a GPU, so the image runs
+# anywhere; it is simply slower.
+
+FROM rust:1-bookworm AS build
+
+WORKDIR /src
+
+# Dependencies change far less often than the code, so they are built first
+# against a skeleton and cached. A one-line change then rebuilds in seconds
+# rather than re-fetching the whole registry.
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+COPY crates/asaborake-core/profiles crates/asaborake-core/profiles
+COPY crates/asaborake-server/migrations crates/asaborake-server/migrations
+
+RUN cargo build --release --bin asaborake \
+    && strip target/release/asaborake
+
+FROM nvidia/cuda:12.6.2-runtime-ubuntu24.04
+
+# ffmpeg is the whole runtime dependency. Debian's build has NVENC support
+# compiled in and links against the driver at runtime, so the image needs no
+# CUDA toolkit of its own.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/target/release/asaborake /usr/local/bin/asaborake
+
+# Learned logos and the job database live here. Mount it, or every restart
+# relearns every channel's logo — three extra decoding passes per recording.
+VOLUME ["/var/lib/asaborake"]
+
+# The engine has no authentication. It binds loopback by default; binding it to
+# the container's interface is safe only because the compose file does not
+# publish the port, and the web service is what faces the network.
+ENV ASABORAKE_LOG=asaborake=info
+EXPOSE 8081
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+    CMD ["/usr/local/bin/asaborake", "profiles"]
+
+ENTRYPOINT ["/usr/local/bin/asaborake"]
+CMD ["serve", "--listen", "0.0.0.0:8081"]
