@@ -11,6 +11,7 @@
 
 pub mod api;
 pub mod db;
+pub mod sources;
 pub mod worker;
 
 use std::net::SocketAddr;
@@ -39,6 +40,14 @@ pub struct Config {
     /// How many jobs to run at once.
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,
+    /// Directories the logo tool may read recordings from.
+    ///
+    /// The engine serves frames out of these so a browser can show what a
+    /// recording looks like. Nothing outside them is readable, because a path
+    /// arriving over HTTP is not to be trusted with the filesystem. Empty by
+    /// default, which disables frame serving entirely.
+    #[serde(default)]
+    pub recording_dirs: Vec<PathBuf>,
     /// Path to ffmpeg, when it is not on `PATH`.
     #[serde(default)]
     pub ffmpeg: Option<PathBuf>,
@@ -71,6 +80,7 @@ impl Default for Config {
             database: default_database(),
             logo_dir: default_logo_dir(),
             concurrency: default_concurrency(),
+            recording_dirs: Vec::new(),
             ffmpeg: None,
             ffprobe: None,
         }

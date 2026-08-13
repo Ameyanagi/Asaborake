@@ -9,6 +9,7 @@
 
 import { useEffect, useState } from "react";
 import { api, type Logo } from "../lib/api";
+import { LogoPicker } from "../components/LogoPicker";
 import { Action, Empty, Failure, Page } from "../components/shell";
 
 export function Logos() {
@@ -44,10 +45,12 @@ export function Logos() {
     >
       {error && <Failure message={error} />}
 
+      <LogoPicker onLearned={load} />
+
       {logos?.length === 0 && (
         <Empty
           title="No logos learned yet"
-          detail="Asaborake learns a channel's logo the first time it transcodes a recording from it, then reuses it — which removes three decoding passes from every job after the first."
+          detail="Teach one above, or let a job learn it: Asaborake tries to find a channel's logo the first time it transcodes a recording from it. Teaching is the reliable route — on real broadcast the corner it should be watching is often covered by a telop banner, and it aims at that instead."
         />
       )}
 

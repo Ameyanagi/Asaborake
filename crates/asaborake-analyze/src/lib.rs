@@ -323,6 +323,36 @@ const REFINEMENT_GATE: f32 = 0.25;
 /// same, for the same reason.
 ///
 /// A logo from the store skips all three.
+/// Learn a logo from one recording, using a rectangle an operator drew.
+///
+/// This is the logo tool's whole engine side. Automatic location is a fallback
+/// for when nobody has aimed yet, and on real broadcast it is the weak link:
+/// a permanent telop banner or an emergency overlay looks more like a logo
+/// than the logo does. A rectangle drawn by someone who can see the picture
+/// removes that guess entirely, which is why Amatsukaze asks for one.
+///
+/// Returns `None` when no logo could be fitted inside the rectangle — usually
+/// because the background behind it never varied enough to separate the logo
+/// from it.
+///
+/// # Errors
+/// Returns [`Error::Media`] when the recording cannot be decoded.
+pub fn learn(
+    ffmpeg: &Ffmpeg,
+    input: &Path,
+    rect: Rect,
+    options: &AnalysisOptions,
+    on_progress: &mut dyn FnMut(AnalysisProgress),
+) -> Result<Option<LogoData>, Error> {
+    let probe = asaborake_media::probe(ffmpeg, input).map_err(Error::Media)?;
+    let duration = probe.duration_seconds.unwrap_or(0.0);
+    let options = AnalysisOptions {
+        logo_rect: Some(rect),
+        ..options.clone()
+    };
+    learn_logo(ffmpeg, input, &probe, &options, duration, on_progress)
+}
+
 fn learn_logo(
     ffmpeg: &Ffmpeg,
     input: &Path,
@@ -408,8 +438,26 @@ fn learn_logo(
             Ok(Some(logo))
         }
         // Refinement can reject every frame if the bootstrap was too weak to
-        // recognise its own logo. The bootstrap is still the best available.
-        None => Ok(Some(bootstrap)),
+        // recognise its own logo. The bootstrap is still the best available —
+        // but only if it looks like a logo at all. It was fitted with the
+        // plausibility check deliberately switched off, so falling back to it
+        // unconditionally is how a fit of nothing at all became a stored
+        // "logo": near-zero opacity everywhere, saved against the channel, and
+        // reused for every recording from it afterwards.
+        None if bootstrap.is_plausible() => {
+            tracing::info!(
+                alpha = bootstrap.mean_alpha(),
+                "refinement found no logo-carrying frames; keeping the bootstrap fit"
+            );
+            Ok(Some(bootstrap))
+        }
+        None => {
+            tracing::info!(
+                alpha = bootstrap.mean_alpha(),
+                "nothing in that region looks like a logo"
+            );
+            Ok(None)
+        }
     }
 }
 

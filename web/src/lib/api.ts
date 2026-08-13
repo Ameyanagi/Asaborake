@@ -236,7 +236,62 @@ export const api = {
     }),
 
   listProfiles: () => request<Profile[]>("/profiles"),
+
+  listRecordings: () => request<Recording[]>("/recordings"),
+
+  probeRecording: (path: string) =>
+    request<SourceInfo>(`/recordings/probe?path=${encodeURIComponent(path)}`),
+
+  /**
+   * The URL of one frame, for an `<img src>`.
+   *
+   * A URL rather than a fetch because the browser's own image cache is what
+   * makes scrubbing back and forth feel immediate.
+   */
+  frameUrl: (path: string, at: number, width: number) =>
+    `/api/v1/frame?path=${encodeURIComponent(path)}&at=${at.toFixed(2)}&width=${width}`,
+
+  scanLogo: (body: {
+    path: string;
+    rect: Rect;
+    channel_id?: string;
+    name?: string;
+  }) => request<ScanResult>("/logos/scan", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }),
 };
+
+/** A recording the logo tool may read. */
+export interface Recording {
+  path: string;
+  name: string;
+  size: number;
+}
+
+/** What a recording is, in the terms the logo tool needs. */
+export interface SourceInfo {
+  duration_seconds: number | null;
+  width: number;
+  height: number;
+  fps: number;
+  interlaced: boolean;
+}
+
+/** What came of scanning a rectangle. */
+export type ScanResult =
+  | { learned: false; reason: string }
+  | {
+      learned: true;
+      name: string;
+      channel_id: string | null;
+      source_width: number;
+      source_height: number;
+      rect: Rect;
+      mean_alpha: number;
+      frames_used: number;
+      preview: string | null;
+    };
 
 /**
  * Subscribe to live updates.

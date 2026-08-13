@@ -22,6 +22,7 @@ pub mod ffmpeg;
 pub mod frames;
 pub mod probe;
 pub mod run;
+pub mod still;
 
 pub use audio::{RmsEnvelope, rms_envelope};
 pub use encode::{Chapter, ffmetadata, progress_args};
@@ -29,6 +30,7 @@ pub use ffmpeg::{Ffmpeg, MINIMUM_FFMPEG_VERSION};
 pub use frames::{Frame, FrameReader, FrameReaderOptions};
 pub use probe::{AudioStream, MediaProbe, VideoStream, probe};
 pub use run::{Progress, run_with_progress};
+pub use still::{MAX_WIDTH, still_png};
 
 use std::path::PathBuf;
 

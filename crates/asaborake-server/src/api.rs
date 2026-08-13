@@ -27,10 +27,14 @@ pub fn router(context: Context) -> Router {
         .route("/api/v1/jobs/{id}/events", get(job_events))
         .route("/api/v1/jobs/{id}/analysis", get(job_analysis))
         .route("/api/v1/logos", get(list_logos))
+        .route("/api/v1/logos/scan", post(scan_logo))
         .route(
             "/api/v1/logos/{channel}/{width}/{height}",
             delete(forget_logo),
         )
+        .route("/api/v1/recordings", get(list_recordings))
+        .route("/api/v1/recordings/probe", get(probe_recording))
+        .route("/api/v1/frame", get(frame))
         .route("/api/v1/profiles", get(list_profiles))
         .route("/api/v1/events", get(stream_events))
         .with_state(context)
@@ -317,6 +321,214 @@ async fn forget_logo(
         .remove(&channel, width, height)
         .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(Json(json!({ "removed": removed })))
+}
+
+async fn list_recordings(State(context): State<Context>) -> Json<Vec<crate::sources::Recording>> {
+    Json(crate::sources::list(&context.config.recording_dirs))
+}
+
+/// Which recording to describe.
+#[derive(Debug, Deserialize)]
+struct PathQuery {
+    path: String,
+}
+
+/// What the logo tool needs to know before it can show a recording.
+///
+/// The duration bounds the scrubber, and the coded size is what a rectangle
+/// drawn on screen has to be converted back into: the scanner works in source
+/// pixels, and the browser is showing a scaled, un-squashed picture.
+async fn probe_recording(
+    State(context): State<Context>,
+    Query(query): Query<PathQuery>,
+) -> ApiResult<Json<Value>> {
+    let Some(path) = crate::sources::resolve(&context.config.recording_dirs, &query.path) else {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "that path is not inside a configured recordings directory",
+        ));
+    };
+
+    let ffmpeg = std::sync::Arc::clone(&context.ffmpeg);
+    let probe = tokio::task::spawn_blocking(move || asaborake_media::probe(&ffmpeg, &path))
+        .await
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+
+    let video = probe.video.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "that recording has no video stream",
+        )
+    })?;
+
+    Ok(Json(json!({
+        "duration_seconds": probe.duration_seconds,
+        "width": video.width,
+        "height": video.height,
+        "fps": video.fps(),
+        "interlaced": video.interlaced,
+    })))
+}
+
+/// Which frame of which recording to show.
+#[derive(Debug, Deserialize)]
+struct FrameQuery {
+    /// Absolute path, as `/api/v1/recordings` gave it.
+    path: String,
+    /// Position in the recording, in seconds.
+    #[serde(default)]
+    at: f64,
+    /// Width to render at.
+    #[serde(default = "default_frame_width")]
+    width: u32,
+}
+
+const fn default_frame_width() -> u32 {
+    960
+}
+
+/// Serve one frame of a recording as a PNG.
+///
+/// This is what makes the logo tool possible: without seeing the picture there
+/// is no way to draw a rectangle over the logo, which is the one thing that
+/// makes detection work reliably on real broadcast.
+async fn frame(State(context): State<Context>, Query(query): Query<FrameQuery>) -> Response {
+    let Some(path) = crate::sources::resolve(&context.config.recording_dirs, &query.path) else {
+        return ApiError::new(
+            StatusCode::FORBIDDEN,
+            "that path is not inside a configured recordings directory",
+        )
+        .into_response();
+    };
+
+    let ffmpeg = std::sync::Arc::clone(&context.ffmpeg);
+    let at = query.at.max(0.0);
+    let width = query.width;
+    // Decoding is blocking and can take a moment on a large recording; it must
+    // not be done on a thread that is also serving the event stream.
+    let rendered =
+        tokio::task::spawn_blocking(move || asaborake_media::still_png(&ffmpeg, &path, at, width))
+            .await;
+
+    match rendered {
+        Ok(Ok(png)) if !png.is_empty() => (
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "image/png"),
+                // A given frame of a given recording never changes, and
+                // scrubbing revisits the same positions constantly.
+                (axum::http::header::CACHE_CONTROL, "private, max-age=3600"),
+            ],
+            png,
+        )
+            .into_response(),
+        Ok(Ok(_)) => ApiError::new(
+            StatusCode::NOT_FOUND,
+            "there is no frame at that position; the recording may be shorter than it claims",
+        )
+        .into_response(),
+        Ok(Err(error)) => {
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
+        Err(error) => {
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
+    }
+}
+
+/// A request to learn a logo from a rectangle someone drew.
+#[derive(Debug, Deserialize)]
+struct ScanRequest {
+    /// Recording to learn from.
+    path: String,
+    /// Where the logo is, in source pixels.
+    rect: asaborake_analyze::Rect,
+    /// Channel this logo belongs to, which is what jobs look it up by.
+    #[serde(default)]
+    channel_id: Option<String>,
+    /// Human-readable name.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Learn a logo from a rectangle and add it to the store.
+///
+/// Runs synchronously: it is one decoding pass over a recording, which takes
+/// tens of seconds, and the operator who drew the rectangle is waiting to see
+/// whether it worked. Making it a queued job would hide the answer behind a
+/// second screen.
+async fn scan_logo(
+    State(context): State<Context>,
+    Json(request): Json<ScanRequest>,
+) -> ApiResult<Json<Value>> {
+    let Some(store) = context.logos.as_ref() else {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "no logo store is configured, so there is nowhere to keep the result",
+        ));
+    };
+    let Some(path) = crate::sources::resolve(&context.config.recording_dirs, &request.path) else {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "that path is not inside a configured recordings directory",
+        ));
+    };
+    if !request.rect.is_valid() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "the rectangle has no area",
+        ));
+    }
+
+    let ffmpeg = std::sync::Arc::clone(&context.ffmpeg);
+    let store = std::sync::Arc::clone(store);
+    let rect = request.rect;
+    let options = asaborake_analyze::AnalysisOptions {
+        logo_name: request
+            .name
+            .clone()
+            .or_else(|| request.channel_id.clone())
+            .unwrap_or_else(|| "unnamed".to_owned()),
+        channel_id: request.channel_id.clone(),
+        ..asaborake_analyze::AnalysisOptions::default()
+    };
+
+    let learned = tokio::task::spawn_blocking(move || {
+        let logo = asaborake_analyze::learn(&ffmpeg, &path, rect, &options, &mut |_| {})?;
+        Ok::<_, asaborake_analyze::Error>(match logo {
+            Some(logo) => {
+                store.save(&logo).ok();
+                Some(logo)
+            }
+            None => None,
+        })
+    })
+    .await
+    .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+    .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+
+    let Some(logo) = learned else {
+        return Ok(Json(json!({
+            "learned": false,
+            // The likeliest cause by far, and the one the operator can act on:
+            // pick a recording where the background behind the logo changes.
+            "reason": "no logo could be fitted inside that rectangle — the background \
+                       behind it may never have varied enough to separate the two",
+        })));
+    };
+
+    Ok(Json(json!({
+        "learned": true,
+        "name": logo.name,
+        "channel_id": logo.channel_id,
+        "source_width": logo.source_width,
+        "source_height": logo.source_height,
+        "rect": logo.rect,
+        "mean_alpha": logo.mean_alpha(),
+        "frames_used": logo.frames_used,
+        "preview": preview_data_uri(&logo),
+    })))
 }
 
 async fn list_profiles(State(context): State<Context>) -> Json<Value> {
