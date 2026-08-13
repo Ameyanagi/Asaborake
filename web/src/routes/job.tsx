@@ -15,12 +15,90 @@ import {
   subscribe,
   type Analysis,
   type CutPlan,
+  type Diagnostics,
   type Job,
   type JobEvent,
   type Segment,
 } from "../lib/api";
 import { Timeline } from "../components/Timeline";
-import { Action, Empty, Failure, Page, Readout } from "../components/shell";
+import {
+  Action,
+  Empty,
+  Failure,
+  Notice,
+  Page,
+  Readout,
+} from "../components/shell";
+
+/**
+ * What the recording was and how cleanly it arrived.
+ *
+ * The counters are shown as a share of the whole rather than raw totals: four
+ * hundred lost packets is either nothing or a broken aerial depending entirely
+ * on how many there were.
+ */
+function Source({ source }: { source: Diagnostics }) {
+  const share = (count: number) => {
+    if (count === 0) return "none";
+    const percent = (count / Math.max(source.total_packets, 1)) * 100;
+    return `${count.toLocaleString()} · ${
+      percent < 0.01 ? "<0.01" : percent.toFixed(2)
+    }%`;
+  };
+
+  return (
+    <section className="border-b border-rule px-6 py-5">
+      <h2 className="eyebrow mb-4">Source</h2>
+
+      <dl className="grid gap-x-10 gap-y-2 sm:grid-cols-[9rem_1fr]">
+        <dt className="text-ink-faint">Picture</dt>
+        <dd className="text-ink-dim tabular-nums">
+          {source.video ?? "no video stream"}
+          {source.format_changes.length > 0 &&
+            `, changing at ${source.format_changes
+              .map((at) => formatDuration(at))
+              .join(", ")}`}
+        </dd>
+
+        <dt className="text-ink-faint">Audio</dt>
+        <dd className="text-ink-dim tabular-nums">
+          {source.audio.length === 0
+            ? "no audio stream"
+            : source.audio.join(" · ")}
+        </dd>
+
+        <dt className="text-ink-faint">Captions</dt>
+        <dd className="text-ink-dim">
+          {source.has_captions ? "present" : "none"}
+        </dd>
+
+        <dt className="text-ink-faint">Lost</dt>
+        <dd className="text-ink-dim tabular-nums">
+          {share(source.dropped_packets)}
+        </dd>
+
+        <dt className="text-ink-faint">Scrambled</dt>
+        <dd
+          className={`tabular-nums ${
+            source.scrambled_packets > 0 ? "text-alert" : "text-ink-dim"
+          }`}
+        >
+          {share(source.scrambled_packets)}
+        </dd>
+
+        <dt className="text-ink-faint">Corrupt</dt>
+        <dd className="text-ink-dim tabular-nums">
+          {share(source.error_packets)}
+        </dd>
+
+        <dt className="text-ink-faint">Packets read</dt>
+        <dd className="text-ink-dim tabular-nums">
+          {source.total_packets.toLocaleString()}
+        </dd>
+      </dl>
+    </section>
+  );
+}
 
 export function JobDetail() {
   const { jobId } = useParams({ from: "/jobs/$jobId" });
@@ -28,6 +106,7 @@ export function JobDetail() {
   const [job, setJob] = useState<Job | null>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [plan, setPlan] = useState<CutPlan | null>(null);
+  const [source, setSource] = useState<Diagnostics | null>(null);
   const [events, setEvents] = useState<JobEvent[]>([]);
   const [selected, setSelected] = useState<Segment | undefined>();
   const [error, setError] = useState<string | null>(null);
@@ -46,6 +125,7 @@ export function JobDetail() {
           if (!live) return;
           setAnalysis(loaded.analysis);
           setPlan(loaded.plan);
+          setSource(loaded.diagnostics);
         })
         .catch(() => {});
       void api
@@ -90,10 +170,14 @@ export function JobDetail() {
   }
 
   const name = job.title ?? job.input.split("/").pop() ?? job.input;
-  const cut =
+  // What was labelled commercial, which is only what was removed when the
+  // plan was confident enough to cut. Below that bar the labels become
+  // chapters and the recording is kept whole.
+  const commercial =
     plan?.segments
       .filter((segment) => segment.kind === "commercial")
       .reduce((total, segment) => total + (segment.end - segment.start), 0) ?? 0;
+  const wasCut = plan?.decision === "cut";
 
   return (
     <Page
@@ -113,6 +197,7 @@ export function JobDetail() {
       }
     >
       {job.error && <Failure message={job.error} />}
+      {source && <Notice messages={source.warnings} />}
 
       <section className="flex flex-wrap gap-10 border-b border-rule px-6 py-5">
         <Readout
@@ -136,12 +221,13 @@ export function JobDetail() {
         )}
         {plan && (
           <>
-            <Readout label="removed" value={formatDuration(cut)} tone="signal" />
-            <Readout label="confidence" value={plan.confidence.toFixed(2)} />
             <Readout
-              label="decision"
-              value={plan.decision === "cut" ? "cut" : "kept whole"}
+              label={wasCut ? "removed" : "marked as CM"}
+              value={formatDuration(commercial)}
+              tone={wasCut ? "signal" : undefined}
             />
+            <Readout label="confidence" value={plan.confidence.toFixed(2)} />
+            <Readout label="decision" value={wasCut ? "cut" : "kept whole"} />
           </>
         )}
         {analysis?.logo && (
@@ -157,6 +243,8 @@ export function JobDetail() {
           {plan.reason}
         </p>
       )}
+
+      {source && <Source source={source} />}
 
       {analysis && plan ? (
         <section className="px-6 py-6">

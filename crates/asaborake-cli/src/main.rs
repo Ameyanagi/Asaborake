@@ -334,8 +334,11 @@ fn probe(input: &Path, json: bool) -> Result<()> {
         "health        {} dropped, {} scrambled, {} errors",
         info.stats.dropped_packets, info.stats.scrambled_packets, info.stats.error_packets
     );
-    if info.requires_split() {
-        println!("note          the picture geometry changes mid-recording");
+
+    // The counters above are the evidence; these are the conclusions drawn
+    // from them, which is what a job records and what the web UI shows.
+    for warning in &asaborake_core::Diagnostics::from_ts(&info).warnings {
+        println!("note          {warning}");
     }
     Ok(())
 }
@@ -457,11 +460,29 @@ fn encode(
 
     println!("wrote {}", outcome.output.display());
     println!("cut record {}", outcome.sidecar.display());
-    println!(
-        "removed {:.1}s, confidence {:.2}",
-        outcome.plan.cut_seconds(),
-        outcome.plan.confidence
-    );
+    if outcome.plan.decision == asaborake_cmcut::Decision::Cut {
+        println!(
+            "removed {:.1}s, confidence {:.2}",
+            outcome.plan.removed_seconds(),
+            outcome.plan.confidence
+        );
+    } else {
+        // Saying "removed 0.0s" invites the reader to assume nothing was
+        // found, when in fact something was found and deliberately not cut.
+        println!(
+            "kept whole, {:.1}s marked as commercial in the chapters, confidence {:.2}",
+            outcome.plan.cut_seconds(),
+            outcome.plan.confidence
+        );
+    }
+
+    // On stderr, so piping the result of a batch run somewhere still gets the
+    // three lines above and nothing else.
+    if let Some(diagnostics) = &outcome.diagnostics {
+        for warning in &diagnostics.warnings {
+            eprintln!("warning: {warning}");
+        }
+    }
     Ok(())
 }
 
@@ -526,9 +547,17 @@ fn run_epgstation(cli: &Cli, profile_name: &str, no_cut: bool) -> Result<()> {
 
     match outcome {
         Ok(outcome) => {
+            // EPGStation keeps the log lines against the recording, so this is
+            // where an operator would find out that a channel has been
+            // recording badly.
+            if let Some(diagnostics) = &outcome.diagnostics {
+                for warning in &diagnostics.warnings {
+                    reporter.report(&mut stdout, 1.0, warning);
+                }
+            }
             reporter.report(&mut stdout, 1.0, "done");
             tracing::info!(
-                removed = outcome.plan.cut_seconds(),
+                removed = outcome.plan.removed_seconds(),
                 confidence = outcome.plan.confidence,
                 "finished"
             );

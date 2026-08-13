@@ -127,6 +127,26 @@ export interface CutPlan {
   reason: string;
 }
 
+/**
+ * What the source recording contained, and what was wrong with it.
+ *
+ * Only transport streams carry any of this — an MP4 has no continuity counters
+ * to be discontinuous and nothing to be scrambled — so a job from any other
+ * source has none.
+ */
+export interface Diagnostics {
+  duration_seconds: number;
+  video: string | null;
+  audio: string[];
+  has_captions: boolean;
+  format_changes: number[];
+  dropped_packets: number;
+  scrambled_packets: number;
+  error_packets: number;
+  total_packets: number;
+  warnings: string[];
+}
+
 /** The engine's health, and what it can encode with. */
 export interface Health {
   status: string;
@@ -182,9 +202,11 @@ export const api = {
   jobEvents: (id: string, after = 0) =>
     request<JobEvent[]>(`/jobs/${id}/events?after=${after}`),
   jobAnalysis: (id: string) =>
-    request<{ analysis: Analysis | null; plan: CutPlan | null }>(
-      `/jobs/${id}/analysis`,
-    ),
+    request<{
+      analysis: Analysis | null;
+      plan: CutPlan | null;
+      diagnostics: Diagnostics | null;
+    }>(`/jobs/${id}/analysis`),
 
   submitJob: (job: {
     input: string;

@@ -11,6 +11,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic))]
 
 pub mod chapters;
+pub mod diagnostics;
 pub mod encode;
 pub mod pipeline;
 pub mod profile;
@@ -18,6 +19,7 @@ pub mod store;
 
 use std::path::PathBuf;
 
+pub use diagnostics::Diagnostics;
 pub use encode::{EncodeRequest, encode};
 pub use pipeline::{JobOutcome, JobRequest, PipelineProgress, Sidecar, run};
 pub use profile::{Container, Profile, builtin};
@@ -48,6 +50,19 @@ pub enum Error {
     LowConfidence {
         /// What the segmenter reported.
         reason: String,
+    },
+
+    /// The source is too damaged to be worth transcoding.
+    #[error(
+        "the recording is {}% scrambled, so decryption failed and transcoding it \
+         would only produce an unwatchable file",
+        scrambled.saturating_mul(100) / (*total).max(1)
+    )]
+    DamagedSource {
+        /// Packets that were still scrambled.
+        scrambled: u64,
+        /// Packets read in total.
+        total: u64,
     },
 
     /// A profile document could not be parsed.

@@ -94,6 +94,29 @@ export function Failure({ message }: { message: string }) {
   );
 }
 
+/**
+ * Something worth knowing that did not stop the job.
+ *
+ * Distinct from `Failure` on purpose: a recording with poor reception still
+ * produced a file, and colouring that the same red as a failed job would teach
+ * a reader to ignore the colour.
+ */
+export function Notice({ messages }: { messages: string[] }) {
+  if (messages.length === 0) return null;
+  return (
+    <div className="mx-6 mt-6 border-l-2 border-programme bg-panel px-4 py-3">
+      <div className="eyebrow" style={{ color: "var(--color-programme)" }}>
+        {messages.length === 1 ? "note" : "notes"}
+      </div>
+      <ul className="mt-1.5 space-y-1 font-sans text-ink">
+        {messages.map((message) => (
+          <li key={message}>{message}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /** A quiet action. Buttons say exactly what happens when they are used. */
 export function Action({
   onClick,

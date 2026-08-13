@@ -274,10 +274,11 @@ impl Store {
         error: Option<&str>,
         analysis: Option<&str>,
         plan: Option<&str>,
+        diagnostics: Option<&str>,
     ) -> Result<(), Error> {
         sqlx::query(
             "UPDATE jobs
-             SET status = ?, error = ?, analysis = ?, plan = ?,
+             SET status = ?, error = ?, analysis = ?, plan = ?, diagnostics = ?,
                  finished_at = ?, progress = CASE WHEN ? = 'completed' THEN 1.0 ELSE progress END
              WHERE id = ?",
         )
@@ -285,6 +286,7 @@ impl Store {
         .bind(error)
         .bind(analysis)
         .bind(plan)
+        .bind(diagnostics)
         .bind(Utc::now().to_rfc3339())
         .bind(status.as_str())
         .bind(id)
@@ -395,21 +397,37 @@ impl Store {
             .collect())
     }
 
-    /// The stored analysis and cut plan for a job, as raw JSON.
+    /// Everything a job produced besides the file itself, as raw JSON.
     ///
     /// # Errors
     /// Returns [`Error::Database`] if the query fails.
-    pub async fn artifacts(
-        &self,
-        id: &str,
-    ) -> Result<Option<(Option<String>, Option<String>)>, Error> {
-        let row = sqlx::query("SELECT analysis, plan FROM jobs WHERE id = ?")
+    pub async fn artifacts(&self, id: &str) -> Result<Option<Artifacts>, Error> {
+        let row = sqlx::query("SELECT analysis, plan, diagnostics FROM jobs WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
             .map_err(Error::Database)?;
-        Ok(row.map(|row| (row.try_get("analysis").ok(), row.try_get("plan").ok())))
+        Ok(row.map(|row| Artifacts {
+            analysis: row.try_get("analysis").ok(),
+            plan: row.try_get("plan").ok(),
+            diagnostics: row.try_get("diagnostics").ok(),
+        }))
     }
+}
+
+/// What a finished job left behind, each as the JSON it was stored as.
+///
+/// Held as text rather than parsed because the server only forwards these to
+/// the browser; parsing them here would cost a round trip through serde and
+/// risk rejecting a document an older version wrote.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Artifacts {
+    /// What analysis found.
+    pub analysis: Option<String>,
+    /// What was decided.
+    pub plan: Option<String>,
+    /// What the recording contained and what was wrong with it.
+    pub diagnostics: Option<String>,
 }
 
 /// Build a [`Job`] from a row, defaulting anything unreadable.
@@ -559,7 +577,14 @@ mod tests {
             .expect("progresses");
 
         store
-            .finish(&id, JobStatus::Completed, None, Some("{}"), Some("{}"))
+            .finish(
+                &id,
+                JobStatus::Completed,
+                None,
+                Some("{}"),
+                Some("{}"),
+                Some(r#"{"warnings":["reception was poor"]}"#),
+            )
             .await
             .expect("finishes");
 
@@ -567,6 +592,21 @@ mod tests {
         assert_eq!(found.status, JobStatus::Completed);
         assert!((found.progress - 1.0).abs() < 1e-9, "{}", found.progress);
         assert!(found.finished_at.is_some());
+
+        let artifacts = store
+            .artifacts(&id)
+            .await
+            .expect("queries")
+            .expect("exists");
+        assert_eq!(artifacts.analysis.as_deref(), Some("{}"));
+        assert!(
+            artifacts
+                .diagnostics
+                .as_deref()
+                .is_some_and(|d| d.contains("reception was poor")),
+            "{:?}",
+            artifacts.diagnostics
+        );
     }
 
     #[tokio::test]
@@ -577,7 +617,14 @@ mod tests {
         store.set_progress(&id, 0.3, "encoding").await.expect("ok");
 
         store
-            .finish(&id, JobStatus::Failed, Some("ffmpeg exited 1"), None, None)
+            .finish(
+                &id,
+                JobStatus::Failed,
+                Some("ffmpeg exited 1"),
+                None,
+                None,
+                None,
+            )
             .await
             .expect("finishes");
 

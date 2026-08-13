@@ -196,28 +196,33 @@ async fn job_events(
     Ok(Json(context.store.events(&id, query.after).await?))
 }
 
-/// The analysis and cut plan, for the timeline editor.
+/// The analysis, cut plan and source diagnostics, for the job detail view.
 #[derive(Debug, Serialize)]
-struct Artifacts {
+struct ArtifactsResponse {
     /// The analysis, as stored. Absent until the job has run.
     analysis: Option<Value>,
     /// The cut plan, as stored.
     plan: Option<Value>,
+    /// What the source contained and what was wrong with it. Absent when the
+    /// source was not a transport stream, or the job predates this being kept.
+    diagnostics: Option<Value>,
 }
 
 async fn job_analysis(
     State(context): State<Context>,
     Path(id): Path<String>,
-) -> ApiResult<Json<Artifacts>> {
-    let (analysis, plan) = context
+) -> ApiResult<Json<ArtifactsResponse>> {
+    let artifacts = context
         .store
         .artifacts(&id)
         .await?
         .ok_or_else(|| ApiError::not_found("job"))?;
 
-    Ok(Json(Artifacts {
-        analysis: analysis.and_then(|text| serde_json::from_str(&text).ok()),
-        plan: plan.and_then(|text| serde_json::from_str(&text).ok()),
+    let parse = |text: Option<String>| text.and_then(|text| serde_json::from_str(&text).ok());
+    Ok(Json(ArtifactsResponse {
+        analysis: parse(artifacts.analysis),
+        plan: parse(artifacts.plan),
+        diagnostics: parse(artifacts.diagnostics),
     }))
 }
 

@@ -17,6 +17,7 @@ use asaborake_media::Ffmpeg;
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
+use crate::diagnostics::Diagnostics;
 use crate::encode::{EncodeRequest, encode};
 use crate::profile::Profile;
 use crate::store::LogoStore;
@@ -50,6 +51,11 @@ pub struct JobRequest {
     pub cut: CutOptions,
     /// Whether to learn and store a logo when the channel has none.
     pub learn_logo: bool,
+    /// Whether to refuse a recording the transport-stream scan calls hopeless.
+    ///
+    /// Off by default: a scan can be wrong about an unusual recording, and
+    /// producing a poor file is a better failure than producing none.
+    pub refuse_damaged: bool,
 }
 
 impl JobRequest {
@@ -66,6 +72,7 @@ impl JobRequest {
             logo_rect: None,
             cut: CutOptions::default(),
             learn_logo: true,
+            refuse_damaged: false,
         }
     }
 }
@@ -83,6 +90,9 @@ pub struct JobOutcome {
     pub plan: CutPlan,
     /// Whether a logo was learned and added to the store.
     pub logo_learned: bool,
+    /// What the recording contained and what was wrong with it, when the
+    /// source was a transport stream that could be scanned.
+    pub diagnostics: Option<Diagnostics>,
 }
 
 /// The record written beside the output.
@@ -104,6 +114,11 @@ pub struct Sidecar {
     pub plan: CutPlan,
     /// What analysis found, minus the per-frame track, which is large.
     pub analysis: Analysis,
+    /// What the source recording contained and what was wrong with it.
+    ///
+    /// Optional so a sidecar written before this existed still parses.
+    #[serde(default)]
+    pub diagnostics: Option<Diagnostics>,
 }
 
 /// Progress from somewhere in the pipeline.
@@ -141,6 +156,9 @@ pub fn run(
         })
     })?;
 
+    let diagnostics = inspect(&request.input);
+    report(diagnostics.as_ref(), request.refuse_damaged)?;
+
     // A stored logo turns three extra decoding passes into none.
     let stored = store
         .zip(request.channel_id.as_deref())
@@ -175,28 +193,13 @@ pub fn run(
     )
     .map_err(Error::Analyze)?;
 
-    // Keep a freshly learned logo, so the next recording on this channel skips
-    // the learning passes entirely.
-    // A logo the detector then found nowhere is not a logo. Caching it would
-    // skip relearning on every future recording of this channel, entrenching
-    // the mistake.
-    let mut logo_learned = false;
-    if request.learn_logo
-        && analysis.has_logo()
-        && let (Some(store), Some(logo)) = (store, analysis.learned_logo.as_ref())
-    {
-        match store.save(logo) {
-            Ok(_) => logo_learned = true,
-            // Failing to cache a logo costs time on the next recording and
-            // nothing else, so it must not fail the job.
-            Err(error) => tracing::warn!(%error, "could not store the learned logo"),
-        }
-    }
+    let logo_learned = request.learn_logo && remember_logo(store, &analysis);
 
     let plan = asaborake_cmcut::plan(&analysis, &request.cut);
     tracing::info!(
         confidence = plan.confidence,
-        cut_seconds = plan.cut_seconds(),
+        removed_seconds = plan.removed_seconds(),
+        commercial_seconds = plan.cut_seconds(),
         reason = %plan.reason,
         "cut plan"
     );
@@ -230,7 +233,7 @@ pub fn run(
         },
     )?;
 
-    let sidecar = write_sidecar(request, &analysis, &plan)?;
+    let sidecar = write_sidecar(request, &analysis, &plan, diagnostics.clone())?;
 
     on_progress(PipelineProgress {
         fraction: 1.0,
@@ -243,7 +246,85 @@ pub fn run(
         analysis,
         plan,
         logo_learned,
+        diagnostics,
     })
+}
+
+/// Cache a freshly learned logo, so the next recording on this channel skips
+/// the learning passes entirely. Returns whether anything was stored.
+///
+/// A logo the detector then found nowhere is not a logo, and caching it would
+/// skip relearning on every future recording of this channel, entrenching the
+/// mistake — so only a logo that was actually detected is kept.
+fn remember_logo(store: Option<&LogoStore>, analysis: &Analysis) -> bool {
+    if !analysis.has_logo() {
+        return false;
+    }
+    let (Some(store), Some(logo)) = (store, analysis.learned_logo.as_ref()) else {
+        return false;
+    };
+    match store.save(logo) {
+        Ok(_) => true,
+        // Failing to cache a logo costs time on the next recording and nothing
+        // else, so it must not fail the job.
+        Err(error) => {
+            tracing::warn!(%error, "could not store the learned logo");
+            false
+        }
+    }
+}
+
+/// Log what the scan found, and stop if the recording is beyond saving.
+///
+/// # Errors
+/// Returns [`Error::DamagedSource`] when the recording is mostly scrambled and
+/// the caller asked to refuse those.
+fn report(diagnostics: Option<&Diagnostics>, refuse_damaged: bool) -> Result<(), Error> {
+    let Some(diagnostics) = diagnostics else {
+        return Ok(());
+    };
+    for warning in &diagnostics.warnings {
+        tracing::warn!("{warning}");
+    }
+    if diagnostics.is_hopeless() && refuse_damaged {
+        return Err(Error::DamagedSource {
+            scrambled: diagnostics.scrambled_packets,
+            total: diagnostics.total_packets,
+        });
+    }
+    Ok(())
+}
+
+/// Scan the source transport stream for its inventory and health counters.
+///
+/// Only a transport stream carries any of this: an MP4 has no continuity
+/// counters to be discontinuous and nothing to be scrambled. A failure here is
+/// logged and otherwise ignored, because a recording that ffmpeg can decode is
+/// worth transcoding even if this crate cannot parse its container.
+fn inspect(input: &Path) -> Option<Diagnostics> {
+    let extension = input
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase());
+    if !matches!(extension.as_deref(), Some("ts" | "m2ts" | "mts" | "tsv")) {
+        return None;
+    }
+
+    let file = match std::fs::File::open(input) {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(%error, "could not open the source to inspect it");
+            return None;
+        }
+    };
+    let size = file.metadata().map_or(0, |m| m.len());
+
+    match asaborake_ts::scan(std::io::BufReader::new(file), size) {
+        Ok(info) => Some(Diagnostics::from_ts(&info)),
+        Err(error) => {
+            tracing::warn!(%error, "could not scan the source transport stream");
+            None
+        }
+    }
 }
 
 /// Write the `.cut.json` record beside the output.
@@ -251,6 +332,7 @@ fn write_sidecar(
     request: &JobRequest,
     analysis: &Analysis,
     plan: &CutPlan,
+    diagnostics: Option<Diagnostics>,
 ) -> Result<PathBuf, Error> {
     let path = sidecar_path(&request.output);
 
@@ -266,6 +348,7 @@ fn write_sidecar(
         title: request.title.clone(),
         plan: plan.clone(),
         analysis: trimmed,
+        diagnostics,
     };
 
     let json = serde_json::to_string_pretty(&sidecar).map_err(Error::SidecarEncode)?;
@@ -325,6 +408,41 @@ mod tests {
         ] {
             assert!(!describe(stage).is_empty());
         }
+    }
+
+    #[test]
+    fn only_a_transport_stream_is_scanned() {
+        // An MP4 has no continuity counters to be discontinuous and nothing to
+        // be scrambled, so reading one through the TS parser would waste a full
+        // pass over the file to learn nothing.
+        assert!(inspect(Path::new("/recordings/News.mp4")).is_none());
+        assert!(inspect(Path::new("/recordings/News")).is_none());
+        // A transport stream is scanned — and a missing one fails softly,
+        // because ffmpeg is the authority on whether a job can run.
+        assert!(inspect(Path::new("/recordings/does-not-exist.ts")).is_none());
+    }
+
+    #[test]
+    fn a_hopeless_recording_is_refused_only_when_asked() {
+        let hopeless = Diagnostics {
+            duration_seconds: 1800.0,
+            video: None,
+            audio: Vec::new(),
+            has_captions: false,
+            format_changes: Vec::new(),
+            dropped_packets: 0,
+            scrambled_packets: 900_000,
+            error_packets: 0,
+            total_packets: 1_000_000,
+            warnings: Vec::new(),
+        };
+
+        // The default is to transcode it anyway: a scan can be wrong about an
+        // unusual recording, and a poor file beats no file.
+        assert!(report(Some(&hopeless), false).is_ok());
+
+        let error = report(Some(&hopeless), true).expect_err("must refuse");
+        assert!(error.to_string().contains("90%"), "{error}");
     }
 
     #[test]

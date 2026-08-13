@@ -207,6 +207,10 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
         Ok(Ok(result)) => {
             let analysis = serde_json::to_string(&result.analysis).ok();
             let plan = serde_json::to_string(&result.plan).ok();
+            let diagnostics = result
+                .diagnostics
+                .as_ref()
+                .and_then(|d| serde_json::to_string(d).ok());
             context
                 .store
                 .finish(
@@ -215,17 +219,40 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
                     None,
                     analysis.as_deref(),
                     plan.as_deref(),
+                    diagnostics.as_deref(),
                 )
                 .await?;
+
+            // The warnings go in the job log rather than only the diagnostics
+            // record, because a poorly-received recording is worth noticing
+            // while reading why a job did what it did.
+            if let Some(diagnostics) = &result.diagnostics {
+                for warning in &diagnostics.warnings {
+                    log(context, &job.id, "warn", warning).await;
+                }
+            }
+
             log(
                 context,
                 &job.id,
                 "info",
-                &format!(
-                    "done: removed {:.1}s, confidence {:.2}",
-                    result.plan.cut_seconds(),
-                    result.plan.confidence
-                ),
+                // What was labelled commercial and what was actually removed
+                // are different numbers whenever confidence was too low to
+                // cut, and saying "removed" for the first is simply wrong.
+                &if result.plan.decision == asaborake_cmcut::Decision::Cut {
+                    format!(
+                        "done: removed {:.1}s, confidence {:.2}",
+                        result.plan.removed_seconds(),
+                        result.plan.confidence
+                    )
+                } else {
+                    format!(
+                        "done: kept whole, {:.1}s marked as commercial in the chapters, \
+                         confidence {:.2}",
+                        result.plan.cut_seconds(),
+                        result.plan.confidence
+                    )
+                },
             )
             .await;
         }
@@ -244,7 +271,7 @@ async fn fail(context: &Context, job: &Job, message: &str) {
     tracing::error!(job = %job.id, message, "job failed");
     let _ = context
         .store
-        .finish(&job.id, JobStatus::Failed, Some(message), None, None)
+        .finish(&job.id, JobStatus::Failed, Some(message), None, None, None)
         .await;
     log(context, &job.id, "error", message).await;
 }

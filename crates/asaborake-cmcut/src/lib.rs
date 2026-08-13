@@ -172,6 +172,22 @@ impl CutPlan {
             .sum()
     }
 
+    /// Total duration that was actually removed, in seconds.
+    ///
+    /// Distinct from [`cut_seconds`](Self::cut_seconds), which counts what was
+    /// *labelled* commercial. When confidence was too low the whole recording
+    /// is kept and those labels become chapters rather than cuts, so reporting
+    /// the label total as the amount removed tells an operator their recording
+    /// was shortened when it was not.
+    #[must_use]
+    pub fn removed_seconds(&self) -> f64 {
+        if self.decision == Decision::Cut {
+            self.cut_seconds()
+        } else {
+            0.0
+        }
+    }
+
     /// Whether anything would actually be removed.
     #[must_use]
     pub fn cuts_anything(&self) -> bool {
@@ -868,6 +884,16 @@ mod tests {
         );
         assert_eq!(plan.keep.len(), 1);
         assert!((plan.kept_seconds() - 1800.0).abs() < 1e-6);
+
+        // The segmenter still labelled the breaks, and those labels become
+        // chapters. Reporting them as time removed would tell an operator
+        // their recording had been shortened when nothing was touched.
+        assert!(plan.cut_seconds() > 0.0, "the breaks were still labelled");
+        assert!(
+            plan.removed_seconds().abs() < 1e-9,
+            "nothing was removed, but {} seconds were reported as removed",
+            plan.removed_seconds()
+        );
     }
 
     #[test]
