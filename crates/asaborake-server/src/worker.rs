@@ -158,6 +158,7 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
     request.channel_id.clone_from(&job.channel_id);
     request.channel_name.clone_from(&job.channel_name);
     request.title.clone_from(&job.title);
+    request.diagnostics = inspect_source(context, &job).await;
 
     // Progress arrives from a blocking thread and has to cross back to the
     // async side to be recorded and published.
@@ -207,10 +208,6 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
         Ok(Ok(result)) => {
             let analysis = serde_json::to_string(&result.analysis).ok();
             let plan = serde_json::to_string(&result.plan).ok();
-            let diagnostics = result
-                .diagnostics
-                .as_ref()
-                .and_then(|d| serde_json::to_string(d).ok());
             context
                 .store
                 .finish(
@@ -219,19 +216,8 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
                     None,
                     analysis.as_deref(),
                     plan.as_deref(),
-                    diagnostics.as_deref(),
                 )
                 .await?;
-
-            // The warnings go in the job log rather than only the diagnostics
-            // record, because a poorly-received recording is worth noticing
-            // while reading why a job did what it did.
-            if let Some(diagnostics) = &result.diagnostics {
-                for warning in &diagnostics.warnings {
-                    log(context, &job.id, "warn", warning).await;
-                }
-            }
-
             log(
                 context,
                 &job.id,
@@ -256,7 +242,7 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
             )
             .await;
         }
-        Ok(Err(error)) => fail(context, &job, &format!("{error:#}")).await,
+        Ok(Err(error)) => fail(context, &job, &explain(&error)).await,
         // The blocking task itself failed, which means a panic in the
         // pipeline. That is a defect, and the job must not look successful.
         Err(error) => fail(context, &job, &format!("worker stopped: {error}")).await,
@@ -266,12 +252,59 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
     Ok(())
 }
 
+/// Render an error together with everything underneath it.
+///
+/// `thiserror` types print only their own message, so a pipeline failure that
+/// began with an ffmpeg exit code reaches the operator as the word "analysis
+/// error" — which says nothing at all. Walking the source chain is what turns
+/// it back into something that can be acted on.
+fn explain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        // Some layers restate their child rather than adding to it; repeating
+        // that back makes the line harder to read, not easier.
+        let text = cause.to_string();
+        if !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+        source = cause.source();
+    }
+    message
+}
+
+/// Scan the source and record what it is before the work begins.
+///
+/// Doing this up front rather than folding it into the pipeline's result is
+/// what keeps it on a job that then fails — and a recording damaged enough to
+/// fail analysis is precisely the one whose diagnostics explain why.
+async fn inspect_source(context: &Context, job: &Job) -> Option<asaborake_core::Diagnostics> {
+    let input = std::path::PathBuf::from(&job.input);
+    // A full pass over a multi-gigabyte file; not something to do on the
+    // async runtime's threads.
+    let diagnostics = tokio::task::spawn_blocking(move || asaborake_core::inspect(&input))
+        .await
+        .ok()
+        .flatten()?;
+
+    if let Ok(text) = serde_json::to_string(&diagnostics) {
+        let _ = context.store.set_diagnostics(&job.id, &text).await;
+    }
+    for warning in &diagnostics.warnings {
+        log(context, &job.id, "warn", warning).await;
+    }
+    publish(context, &job.id).await;
+
+    Some(diagnostics)
+}
+
 /// Record a failure against a job.
 async fn fail(context: &Context, job: &Job, message: &str) {
     tracing::error!(job = %job.id, message, "job failed");
     let _ = context
         .store
-        .finish(&job.id, JobStatus::Failed, Some(message), None, None, None)
+        .finish(&job.id, JobStatus::Failed, Some(message), None, None)
         .await;
     log(context, &job.id, "error", message).await;
 }
@@ -295,6 +328,37 @@ async fn publish(context: &Context, id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_is_reported_with_what_caused_it() {
+        // "analysis error" on its own tells an operator nothing; the ffmpeg
+        // exit code underneath it is the part worth reading.
+        #[derive(Debug, thiserror::Error)]
+        #[error("ffmpeg exited with status 1")]
+        struct Ffmpeg;
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("analysis error")]
+        struct Analysis(#[source] Ffmpeg);
+
+        assert_eq!(
+            explain(&Analysis(Ffmpeg)),
+            "analysis error: ffmpeg exited with status 1"
+        );
+    }
+
+    #[test]
+    fn a_cause_that_only_restates_its_parent_is_not_repeated() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("no such file")]
+        struct Inner;
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("no such file")]
+        struct Outer(#[source] Inner);
+
+        assert_eq!(explain(&Outer(Inner)), "no such file");
+    }
 
     #[test]
     fn a_dropped_update_does_not_block_the_publisher() {

@@ -20,10 +20,25 @@ use crate::Error;
 /// per-frame warnings for a recording with heavy packet loss.
 const STDERR_TAIL_LINES: usize = 40;
 
+/// How far back to look for a line to fold a repeat into.
+///
+/// ffmpeg does not repeat one line; it cycles a small group of them, once per
+/// broken frame. A window rather than "is this the previous line" is what
+/// collapses that, and it is deliberately small so a genuine pattern repeating
+/// across a long run is still reported once per occurrence.
+const REPEAT_WINDOW: usize = 6;
+
+/// One retained line, and how many times it was seen in a row.
+#[derive(Debug)]
+struct TailLine {
+    text: String,
+    seen: u32,
+}
+
 /// A background drain of a child's stderr that retains the last few lines.
 #[derive(Debug)]
 pub struct StderrTail {
-    lines: Arc<Mutex<VecDeque<String>>>,
+    lines: Arc<Mutex<VecDeque<TailLine>>>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -51,10 +66,27 @@ impl StderrTail {
                     // nothing useful left to capture, so stop draining.
                     return;
                 };
+                // A recording with heavy packet loss produces the same handful
+                // of decoder complaints once per frame. Left alone they fill
+                // the whole tail and push out the line that says what actually
+                // went wrong.
+                let start = sink.len().saturating_sub(REPEAT_WINDOW);
+                if let Some(previous) = sink
+                    .iter_mut()
+                    .skip(start)
+                    .find(|previous| previous.text == line)
+                {
+                    previous.seen = previous.seen.saturating_add(1);
+                    continue;
+                }
+
                 if sink.len() == STDERR_TAIL_LINES {
                     sink.pop_front();
                 }
-                sink.push_back(line);
+                sink.push_back(TailLine {
+                    text: line,
+                    seen: 1,
+                });
             }
         });
 
@@ -72,7 +104,13 @@ impl StderrTail {
             |lines| {
                 lines
                     .iter()
-                    .map(String::as_str)
+                    .map(|line| {
+                        if line.seen > 1 {
+                            format!("{} (×{})", line.text, line.seen)
+                        } else {
+                            line.text.clone()
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             },
@@ -288,5 +326,39 @@ mod tests {
         assert!(lines <= STDERR_TAIL_LINES, "kept {lines} lines");
         assert!(stderr.contains("line200"), "the tail must include the end");
         assert!(!stderr.contains("line1\n"), "the head should be dropped");
+    }
+
+    #[test]
+    fn a_repeated_complaint_does_not_crowd_out_the_real_cause() {
+        // What ffmpeg does on a damaged recording: cycle a couple of decoder
+        // complaints once per frame, then say what actually killed it. Without
+        // folding the repeats, the last line is all that survives.
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "for i in $(seq 1 300); do \
+               echo 'Error submitting packet to decoder' >&2; \
+               echo 'Invalid frame dimensions 0x0.' >&2; \
+             done; \
+             echo 'Decode error rate 1 exceeds maximum 0.666667' >&2; \
+             exit 1",
+        ]);
+        let error = capture_stdout(command).expect_err("exit 1 is a failure");
+        let Error::Failed { stderr, .. } = error else {
+            panic!("expected Failed");
+        };
+
+        assert!(
+            stderr.contains("Decode error rate 1 exceeds maximum"),
+            "the cause must survive: {stderr}"
+        );
+        assert!(
+            stderr.contains("(×300)"),
+            "the repeats must be counted rather than listed: {stderr}"
+        );
+        assert!(
+            stderr.lines().count() <= 3,
+            "six hundred lines should fold to three: {stderr}"
+        );
     }
 }

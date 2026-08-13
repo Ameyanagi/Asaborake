@@ -263,6 +263,24 @@ impl Store {
         Ok(())
     }
 
+    /// Record what the source recording contained, as JSON.
+    ///
+    /// Written when the job starts rather than when it finishes, so a job that
+    /// fails still says what it was working from — which is the case where a
+    /// damaged recording explains the failure.
+    ///
+    /// # Errors
+    /// Returns [`Error::Database`] if the update fails.
+    pub async fn set_diagnostics(&self, id: &str, diagnostics: &str) -> Result<(), Error> {
+        sqlx::query("UPDATE jobs SET diagnostics = ? WHERE id = ?")
+            .bind(diagnostics)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(Error::Database)?;
+        Ok(())
+    }
+
     /// Mark a job finished, with its outcome.
     ///
     /// # Errors
@@ -274,11 +292,14 @@ impl Store {
         error: Option<&str>,
         analysis: Option<&str>,
         plan: Option<&str>,
-        diagnostics: Option<&str>,
     ) -> Result<(), Error> {
+        // Deliberately does not touch `diagnostics`: that is written by
+        // [`set_diagnostics`](Self::set_diagnostics) when the job starts, and
+        // clearing it here would lose it on exactly the failed jobs where it
+        // explains what happened.
         sqlx::query(
             "UPDATE jobs
-             SET status = ?, error = ?, analysis = ?, plan = ?, diagnostics = ?,
+             SET status = ?, error = ?, analysis = ?, plan = ?,
                  finished_at = ?, progress = CASE WHEN ? = 'completed' THEN 1.0 ELSE progress END
              WHERE id = ?",
         )
@@ -286,7 +307,6 @@ impl Store {
         .bind(error)
         .bind(analysis)
         .bind(plan)
-        .bind(diagnostics)
         .bind(Utc::now().to_rfc3339())
         .bind(status.as_str())
         .bind(id)
@@ -577,14 +597,11 @@ mod tests {
             .expect("progresses");
 
         store
-            .finish(
-                &id,
-                JobStatus::Completed,
-                None,
-                Some("{}"),
-                Some("{}"),
-                Some(r#"{"warnings":["reception was poor"]}"#),
-            )
+            .set_diagnostics(&id, r#"{"warnings":["reception was poor"]}"#)
+            .await
+            .expect("records the source");
+        store
+            .finish(&id, JobStatus::Completed, None, Some("{}"), Some("{}"))
             .await
             .expect("finishes");
 
@@ -599,6 +616,7 @@ mod tests {
             .expect("queries")
             .expect("exists");
         assert_eq!(artifacts.analysis.as_deref(), Some("{}"));
+        // Finishing must not clear what was recorded when the job started.
         assert!(
             artifacts
                 .diagnostics
@@ -617,14 +635,7 @@ mod tests {
         store.set_progress(&id, 0.3, "encoding").await.expect("ok");
 
         store
-            .finish(
-                &id,
-                JobStatus::Failed,
-                Some("ffmpeg exited 1"),
-                None,
-                None,
-                None,
-            )
+            .finish(&id, JobStatus::Failed, Some("ffmpeg exited 1"), None, None)
             .await
             .expect("finishes");
 
@@ -632,6 +643,34 @@ mod tests {
         assert_eq!(found.status, JobStatus::Failed);
         assert!((found.progress - 0.3).abs() < 1e-9, "progress must be kept");
         assert_eq!(found.error.as_deref(), Some("ffmpeg exited 1"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_job_keeps_what_its_source_was() {
+        // A recording damaged enough to fail analysis is the one whose
+        // diagnostics explain the failure, so they must survive it.
+        let (store, _dir) = store().await;
+        let id = store.submit(&job("broken.ts")).await.expect("submits");
+        store.claim_next().await.expect("claims");
+        store
+            .set_diagnostics(&id, r#"{"scrambled_packets":900000}"#)
+            .await
+            .expect("records the source");
+
+        store
+            .finish(&id, JobStatus::Failed, Some("analysis error"), None, None)
+            .await
+            .expect("finishes");
+
+        let artifacts = store
+            .artifacts(&id)
+            .await
+            .expect("queries")
+            .expect("exists");
+        assert_eq!(
+            artifacts.diagnostics.as_deref(),
+            Some(r#"{"scrambled_packets":900000}"#)
+        );
     }
 
     #[tokio::test]

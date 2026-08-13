@@ -21,7 +21,7 @@ use std::path::PathBuf;
 
 pub use diagnostics::Diagnostics;
 pub use encode::{EncodeRequest, encode};
-pub use pipeline::{JobOutcome, JobRequest, PipelineProgress, Sidecar, run};
+pub use pipeline::{JobOutcome, JobRequest, PipelineProgress, Sidecar, inspect, run};
 pub use profile::{Container, Profile, builtin};
 pub use store::LogoStore;
 

@@ -56,6 +56,13 @@ pub struct JobRequest {
     /// Off by default: a scan can be wrong about an unusual recording, and
     /// producing a poor file is a better failure than producing none.
     pub refuse_damaged: bool,
+    /// What the source contains, when the caller has already scanned it.
+    ///
+    /// A caller that records this before starting — as the server does — keeps
+    /// it on a job that then fails, which is the case where knowing the
+    /// recording was damaged explains the failure. Left unset, the pipeline
+    /// scans the source itself.
+    pub diagnostics: Option<Diagnostics>,
 }
 
 impl JobRequest {
@@ -73,6 +80,7 @@ impl JobRequest {
             cut: CutOptions::default(),
             learn_logo: true,
             refuse_damaged: false,
+            diagnostics: None,
         }
     }
 }
@@ -156,7 +164,12 @@ pub fn run(
         })
     })?;
 
-    let diagnostics = inspect(&request.input);
+    // Scanned by the caller when it wanted the source recorded before the work
+    // began, which is what keeps the diagnostics on a job that then fails.
+    let diagnostics = match request.diagnostics.clone() {
+        Some(diagnostics) => Some(diagnostics),
+        None => inspect(&request.input),
+    };
     report(diagnostics.as_ref(), request.refuse_damaged)?;
 
     // A stored logo turns three extra decoding passes into none.
@@ -301,7 +314,11 @@ fn report(diagnostics: Option<&Diagnostics>, refuse_damaged: bool) -> Result<(),
 /// counters to be discontinuous and nothing to be scrambled. A failure here is
 /// logged and otherwise ignored, because a recording that ffmpeg can decode is
 /// worth transcoding even if this crate cannot parse its container.
-fn inspect(input: &Path) -> Option<Diagnostics> {
+///
+/// Public so a caller can record what the source was before starting the work,
+/// and hand the result back through [`JobRequest::diagnostics`].
+#[must_use]
+pub fn inspect(input: &Path) -> Option<Diagnostics> {
     let extension = input
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
