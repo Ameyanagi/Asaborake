@@ -32,6 +32,10 @@ pub fn router(context: Context) -> Router {
             "/api/v1/logos/{channel}/{width}/{height}",
             delete(forget_logo),
         )
+        .route(
+            "/api/v1/logos/no-logo/{channel}",
+            post(mark_no_logo).delete(clear_no_logo),
+        )
         .route("/api/v1/recordings", get(list_recordings))
         .route("/api/v1/recordings/probe", get(probe_recording))
         .route("/api/v1/frame", get(frame))
@@ -244,30 +248,33 @@ struct LogoSummary {
     preview: Option<String>,
 }
 
-async fn list_logos(State(context): State<Context>) -> ApiResult<Json<Vec<LogoSummary>>> {
+async fn list_logos(State(context): State<Context>) -> ApiResult<Json<Value>> {
     let Some(store) = context.logos.as_ref() else {
-        return Ok(Json(Vec::new()));
+        return Ok(Json(json!({ "logos": [], "channels_without_logos": [] })));
     };
 
     let logos = store
         .list()
         .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
 
-    Ok(Json(
-        logos
-            .into_iter()
-            .map(|logo| LogoSummary {
-                preview: preview_data_uri(&logo),
-                name: logo.name.clone(),
-                channel_id: logo.channel_id.clone(),
-                source_width: logo.source_width,
-                source_height: logo.source_height,
-                rect: logo.rect,
-                mean_alpha: logo.mean_alpha(),
-                frames_used: logo.frames_used,
-            })
-            .collect(),
-    ))
+    let summaries: Vec<LogoSummary> = logos
+        .into_iter()
+        .map(|logo| LogoSummary {
+            preview: preview_data_uri(&logo),
+            name: logo.name.clone(),
+            channel_id: logo.channel_id.clone(),
+            source_width: logo.source_width,
+            source_height: logo.source_height,
+            rect: logo.rect,
+            mean_alpha: logo.mean_alpha(),
+            frames_used: logo.frames_used,
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "logos": summaries,
+        "channels_without_logos": store.channels_without_logos(),
+    })))
 }
 
 /// Render a logo as a PNG data URI.
@@ -321,6 +328,44 @@ async fn forget_logo(
         .remove(&channel, width, height)
         .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(Json(json!({ "removed": removed })))
+}
+
+/// Record that a channel carries no logo.
+///
+/// Not the same as having no logo *yet*: this says one will never be found,
+/// so recordings from the channel stop paying three decoding passes to
+/// rediscover that, and stop waiting for something that is not coming.
+async fn mark_no_logo(
+    State(context): State<Context>,
+    Path(channel): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let Some(store) = context.logos.as_ref() else {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "no logo store is configured",
+        ));
+    };
+    store
+        .mark_no_logo(&channel)
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(json!({ "channel_id": channel, "has_no_logo": true })))
+}
+
+/// Look for a logo on this channel again.
+async fn clear_no_logo(
+    State(context): State<Context>,
+    Path(channel): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let Some(store) = context.logos.as_ref() else {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "no logo store is configured",
+        ));
+    };
+    let cleared = store
+        .clear_no_logo(&channel)
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(json!({ "channel_id": channel, "cleared": cleared })))
 }
 
 async fn list_recordings(State(context): State<Context>) -> Json<Vec<crate::sources::Recording>> {

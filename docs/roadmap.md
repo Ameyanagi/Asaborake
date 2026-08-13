@@ -126,9 +126,10 @@ or so, M a few days, L a week or more.
    every future recording on the channel, which is now refused. No good logo
    has yet been learned from real broadcast: the one watermark available to
    aim at is too faint to fit. The background slider is still missing.
-7. **Per-channel logo rules.** Several logos per channel with validity date
-   ranges, and an explicit "this channel has no logo" entry so those recordings
-   stop being retried hopefully. **M**
+7. **Per-channel logo rules.** The explicit "this channel has no logo" entry
+   is ~~done~~: marking a channel skips both location passes outright and stops
+   its jobs waiting for something that is not coming. Several logos per channel
+   with validity date ranges is still missing. **M**
 8. ~~**Block rather than guess.**~~ **Done.** `on_low_confidence = "block"`
    holds a job in a `blocked` state before the encode rather than after it,
    with a message naming what it needs. Deliberately not coloured as a

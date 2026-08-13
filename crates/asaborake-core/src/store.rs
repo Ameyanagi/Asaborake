@@ -55,6 +55,75 @@ impl LogoStore {
         format!("{safe}-{width}x{height}.abl")
     }
 
+    /// The marker file recording that a channel has no logo at all.
+    fn no_logo_key(channel_id: &str) -> String {
+        let safe: String = channel_id
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        format!("{safe}.nologo")
+    }
+
+    /// Whether this channel is known to carry no logo.
+    ///
+    /// Some channels — NHK's, the shopping channels, most of CS — simply have
+    /// no watermark. Without somewhere to record that, every recording from
+    /// one pays for three extra decoding passes discovering it again, and
+    /// every job either blocks waiting for a logo that will never exist or
+    /// reports low confidence as though something had gone wrong.
+    #[must_use]
+    pub fn has_no_logo(&self, channel_id: &str) -> bool {
+        self.root.join(Self::no_logo_key(channel_id)).is_file()
+    }
+
+    /// Record that this channel carries no logo.
+    ///
+    /// # Errors
+    /// Returns [`Error::Io`] if the marker cannot be written.
+    pub fn mark_no_logo(&self, channel_id: &str) -> Result<(), Error> {
+        let path = self.root.join(Self::no_logo_key(channel_id));
+        // The body is for whoever finds the file, not for this code.
+        std::fs::write(
+            &path,
+            "This channel has no logo. Delete this file to have Asaborake look for one again.\n",
+        )
+        .map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })
+    }
+
+    /// Forget that a channel has no logo, so one is looked for again.
+    ///
+    /// # Errors
+    /// Returns [`Error::Io`] if the marker exists and cannot be removed.
+    pub fn clear_no_logo(&self, channel_id: &str) -> Result<bool, Error> {
+        let path = self.root.join(Self::no_logo_key(channel_id));
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(Error::Io { path, source }),
+        }
+    }
+
+    /// Every channel marked as having no logo.
+    #[must_use]
+    pub fn channels_without_logos(&self) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension()? != "nologo" {
+                    return None;
+                }
+                Some(path.file_stem()?.to_string_lossy().into_owned())
+            })
+            .collect()
+    }
+
     /// Load the logo for a channel at a frame size, if one has been learned.
     #[must_use]
     pub fn load(&self, channel_id: &str, width: u32, height: u32) -> Option<LogoData> {
@@ -190,6 +259,46 @@ mod tests {
         assert!(store.load("101", 720, 480).is_some());
         assert!(store.load("101", 1920, 1080).is_none());
         assert_eq!(store.list().expect("lists").len(), 2);
+    }
+
+    #[test]
+    fn a_channel_can_be_recorded_as_having_no_logo() {
+        // Not "no logo yet": one will never be found, so nothing should keep
+        // looking and nothing should wait for it.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = LogoStore::open(dir.path()).expect("opens");
+
+        assert!(!store.has_no_logo("3273601024"));
+        store.mark_no_logo("3273601024").expect("marks");
+        assert!(store.has_no_logo("3273601024"));
+        assert_eq!(store.channels_without_logos(), vec!["3273601024"]);
+
+        // Other channels are unaffected.
+        assert!(!store.has_no_logo("1024"));
+
+        assert!(store.clear_no_logo("3273601024").expect("clears"));
+        assert!(!store.has_no_logo("3273601024"));
+        // Clearing one that was never marked is not an error.
+        assert!(!store.clear_no_logo("3273601024").expect("clears"));
+    }
+
+    #[test]
+    fn a_no_logo_marker_cannot_escape_the_store_directory() {
+        // The channel id arrives through an environment variable, so it is
+        // sanitised for this path exactly as it is for a logo's.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = LogoStore::open(dir.path()).expect("opens");
+
+        store.mark_no_logo("../../etc/passwd").expect("marks");
+        assert!(
+            dir.path().join("______etc_passwd.nologo").is_file(),
+            "{:?}",
+            std::fs::read_dir(dir.path())
+                .expect("reads")
+                .flatten()
+                .map(|e| e.file_name())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

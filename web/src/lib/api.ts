@@ -231,7 +231,19 @@ export const api = {
   retryJob: (id: string) =>
     request<{ id: string }>(`/jobs/${id}/retry`, { method: "POST" }),
 
-  listLogos: () => request<Logo[]>("/logos"),
+  listLogos: () =>
+    request<{ logos: Logo[]; channels_without_logos: string[] }>("/logos"),
+
+  markNoLogo: (channel: string) =>
+    request<{ has_no_logo: boolean }>(
+      `/logos/no-logo/${encodeURIComponent(channel)}`,
+      { method: "POST" },
+    ),
+  clearNoLogo: (channel: string) =>
+    request<{ cleared: boolean }>(
+      `/logos/no-logo/${encodeURIComponent(channel)}`,
+      { method: "DELETE" },
+    ),
   forgetLogo: (channel: string, width: number, height: number) =>
     request<{ removed: boolean }>(`/logos/${channel}/${width}/${height}`, {
       method: "DELETE",

@@ -14,12 +14,17 @@ import { Action, Empty, Failure, Page } from "../components/shell";
 
 export function Logos() {
   const [logos, setLogos] = useState<Logo[] | null>(null);
+  const [without, setWithout] = useState<string[]>([]);
+  const [channel, setChannel] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const load = () => {
     void api
       .listLogos()
-      .then(setLogos)
+      .then((answer) => {
+        setLogos(answer.logos);
+        setWithout(answer.channels_without_logos);
+      })
       .catch((cause: Error) => setError(cause.message));
   };
 
@@ -53,6 +58,62 @@ export function Logos() {
           detail="Teach one above, or let a job learn it: Asaborake tries to find a channel's logo the first time it transcodes a recording from it. Teaching is the reliable route — on real broadcast the corner it should be watching is often covered by a telop banner, and it aims at that instead."
         />
       )}
+
+      <section className="border-b border-rule px-6 py-5">
+        <h2 className="eyebrow mb-1">Channels with no logo</h2>
+        <p className="mb-4 max-w-2xl font-sans leading-relaxed text-ink-dim">
+          Some channels simply have no watermark. Saying so here stops every
+          recording from one spending three extra decoding passes discovering
+          that again, and stops its jobs waiting for a logo that is not coming.
+        </p>
+
+        <div className="mb-4 flex flex-wrap items-end gap-3">
+          <input
+            value={channel}
+            onChange={(event) => setChannel(event.target.value)}
+            placeholder="channel id"
+            className="w-56 border border-rule-bright bg-panel px-3 py-1.5 text-ink placeholder:text-ink-faint"
+          />
+          <Action
+            disabled={!channel.trim()}
+            onClick={() => {
+              void api
+                .markNoLogo(channel.trim())
+                .then(() => {
+                  setChannel("");
+                  load();
+                })
+                .catch((cause: Error) => setError(cause.message));
+            }}
+          >
+            This channel has no logo
+          </Action>
+        </div>
+
+        {without.length === 0 ? (
+          <p className="text-ink-faint">None marked.</p>
+        ) : (
+          <ul className="flex flex-wrap gap-2">
+            {without.map((id) => (
+              <li key={id}>
+                <button
+                  type="button"
+                  title="Look for a logo on this channel again"
+                  onClick={() => {
+                    void api
+                      .clearNoLogo(id)
+                      .then(load)
+                      .catch((cause: Error) => setError(cause.message));
+                  }}
+                  className="border border-rule-bright px-2.5 py-1 text-ink-dim transition-colors hover:border-alert hover:text-alert"
+                >
+                  {id} ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
 
       {logos && logos.length > 0 && (
         <div className="border-t border-rule">

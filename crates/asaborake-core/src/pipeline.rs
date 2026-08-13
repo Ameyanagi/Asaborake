@@ -179,6 +179,17 @@ pub fn run(
     };
     report(diagnostics.as_ref(), request.refuse_damaged)?;
 
+    // A channel known to carry no logo — NHK's, the shopping channels, most
+    // of CS — must not be searched. Looking anyway costs three extra decoding
+    // passes per recording to rediscover the same nothing, and risks the
+    // locator settling on a telop banner instead.
+    let no_logo = store
+        .zip(request.channel_id.as_deref())
+        .is_some_and(|(store, channel)| store.has_no_logo(channel));
+    if no_logo {
+        tracing::info!("this channel is marked as having no logo; not looking for one");
+    }
+
     // A stored logo turns three extra decoding passes into none.
     let stored = store
         .zip(request.channel_id.as_deref())
@@ -197,6 +208,7 @@ pub fn run(
         channel_id: request.channel_id.clone(),
         logo_rect: request.logo_rect,
         deinterlace: video.interlaced,
+        find_logo: !no_logo,
         ..AnalysisOptions::default()
     };
 
@@ -213,7 +225,7 @@ pub fn run(
     )
     .map_err(Error::Analyze)?;
 
-    let logo_learned = request.learn_logo && remember_logo(store, &analysis);
+    let logo_learned = request.learn_logo && !no_logo && remember_logo(store, &analysis);
 
     let plan = asaborake_cmcut::plan(&analysis, &request.cut);
     tracing::info!(
@@ -224,22 +236,7 @@ pub fn run(
         "cut plan"
     );
 
-    if plan.decision == Decision::KeepAll && plan.confidence < request.cut.confidence_threshold {
-        match request.cut.low_confidence {
-            LowConfidencePolicy::Fail => {
-                return Err(Error::LowConfidence {
-                    reason: plan.reason.clone(),
-                });
-            }
-            // Stopping before the encode is the whole point: an hour of GPU
-            // time spent producing an uncut recording is an hour spent
-            // producing something that will have to be done again.
-            LowConfidencePolicy::Block if !analysis.has_logo() => {
-                return Err(Error::NeedsLogo);
-            }
-            _ => {}
-        }
-    }
+    check_confidence(&plan, request, &analysis, no_logo)?;
 
     let outputs = encode_parts(
         ffmpeg,
@@ -471,6 +468,33 @@ fn clip_segments(
             })
         })
         .collect()
+}
+
+/// Stop the job when the plan is not trustworthy and the policy says to.
+///
+/// # Errors
+/// Returns [`Error::LowConfidence`] or [`Error::NeedsLogo`] accordingly.
+fn check_confidence(
+    plan: &CutPlan,
+    request: &JobRequest,
+    analysis: &Analysis,
+    no_logo: bool,
+) -> Result<(), Error> {
+    if plan.decision != Decision::KeepAll || plan.confidence >= request.cut.confidence_threshold {
+        return Ok(());
+    }
+    match request.cut.low_confidence {
+        LowConfidencePolicy::Fail => Err(Error::LowConfidence {
+            reason: plan.reason.clone(),
+        }),
+        // Stopping before the encode is the whole point: an hour of GPU time
+        // spent producing an uncut recording is an hour spent producing
+        // something that will have to be done again. A channel *known* to have
+        // no logo is the exception — there is nothing to wait for, so waiting
+        // would hold it for ever.
+        LowConfidencePolicy::Block if !analysis.has_logo() && !no_logo => Err(Error::NeedsLogo),
+        _ => Ok(()),
+    }
 }
 
 /// Cache a freshly learned logo, so the next recording on this channel skips

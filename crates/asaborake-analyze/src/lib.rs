@@ -140,6 +140,11 @@ pub struct AnalysisOptions {
     /// finding it again: automatic location has to infer from the picture what
     /// a person can simply see. Supplying it skips the location pass entirely.
     pub logo_rect: Option<Rect>,
+    /// Whether to look for a logo at all.
+    ///
+    /// Off for a channel known to carry none, which skips three decoding
+    /// passes and stops the locator settling on a telop banner instead.
+    pub find_logo: bool,
     /// Name to give a newly learned logo.
     pub logo_name: String,
     /// Channel a newly learned logo belongs to.
@@ -165,6 +170,7 @@ impl Default for AnalysisOptions {
         Self {
             logo: None,
             logo_rect: None,
+            find_logo: true,
             logo_name: "unknown".to_owned(),
             channel_id: None,
             deinterlace: true,
@@ -236,9 +242,11 @@ pub fn analyse(
         .map(|(start, end)| SilentSpan { start, end })
         .collect();
 
-    // A logo from the store skips all three learning passes entirely.
+    // A logo from the store skips all three learning passes entirely, and a
+    // channel known to carry none skips them for good.
     let (logo, from_store) = match options.logo.clone() {
         Some(stored) => (Some(stored), true),
+        None if !options.find_logo => (None, false),
         None => (
             learn_logo(ffmpeg, input, &probe, options, duration, on_progress)?,
             false,
