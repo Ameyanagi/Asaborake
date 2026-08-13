@@ -1,0 +1,18 @@
+# Software HEVC. Slow, but the smallest output of the four.
+name = "x265-cpu"
+description = "HEVC on the CPU via libx265 at up to 1080p."
+container = "mp4"
+
+[video]
+encoder = "libx265"
+max_height = 1080
+args = ["-preset", "medium", "-crf", "26", "-tag:v", "hvc1"]
+
+[audio]
+encoder = "aac"
+channels = 2
+sample_rate = 48000
+args = ["-b:a", "192k"]
+
+[filters]
+deinterlace = "bwdif=mode=send_frame:parity=auto:deint=all"

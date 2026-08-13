@@ -1,0 +1,18 @@
+# Software H.264. No GPU required, so this is what CI and a laptop use.
+name = "x264-cpu"
+description = "H.264 on the CPU via libx264, scaled to 720p."
+container = "mp4"
+
+[video]
+encoder = "libx264"
+max_height = 720
+args = ["-preset", "medium", "-crf", "22", "-profile:v", "high"]
+
+[audio]
+encoder = "aac"
+channels = 2
+sample_rate = 48000
+args = ["-b:a", "192k"]
+
+[filters]
+deinterlace = "bwdif=mode=send_frame:parity=auto:deint=all"

@@ -1,0 +1,33 @@
+# Default profile: NVENC H.264 at 720p.
+#
+# Sized for a recording box with a consumer NVIDIA card. NVENC leaves the CPU
+# free for the analysis pass, which is the part that cannot be offloaded.
+name = "nvenc-h264"
+description = "H.264 on NVENC, scaled to 720p. The default."
+container = "mp4"
+
+[video]
+encoder = "h264_nvenc"
+max_height = 720
+# Constant-quality VBR rather than a bitrate target: broadcast material varies
+# enormously between a static talk show and a sports broadcast, and a fixed
+# bitrate wastes space on one and ruins the other.
+args = [
+    "-preset", "p5",
+    "-tune", "hq",
+    "-rc", "vbr",
+    "-cq", "24",
+    "-b:v", "0",
+    "-profile:v", "high",
+    "-bf", "3",
+    "-spatial-aq", "1",
+]
+
+[audio]
+encoder = "aac"
+channels = 2
+sample_rate = 48000
+args = ["-b:a", "192k"]
+
+[filters]
+deinterlace = "bwdif=mode=send_frame:parity=auto:deint=all"

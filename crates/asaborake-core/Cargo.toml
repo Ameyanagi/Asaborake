@@ -1,0 +1,26 @@
+[package]
+name = "asaborake-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Encoding profiles, the logo store, and the Asaborake job pipeline"
+
+[lints]
+workspace = true
+
+[dependencies]
+asaborake-analyze = { workspace = true }
+asaborake-cmcut = { workspace = true }
+asaborake-media = { workspace = true }
+asaborake-ts = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

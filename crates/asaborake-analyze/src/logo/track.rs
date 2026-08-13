@@ -79,6 +79,9 @@ impl LogoTrack {
         if radius == 0 || self.scores.len() <= 1 {
             return self.scores.clone();
         }
+        // A radius wider than the track is meaningless, and a configured one
+        // large enough to overflow the window arithmetic would panic.
+        let radius = radius.min(self.scores.len());
         let mut window: Vec<f32> = Vec::with_capacity(radius * 2 + 1);
         (0..self.scores.len())
             .map(|index| {
@@ -103,34 +106,31 @@ impl LogoTrack {
             match start {
                 None if score >= options.on_threshold => start = Some(index),
                 Some(from) if score < options.off_threshold => {
-                    push_interval(&mut intervals, self, from, index, options);
+                    intervals.push(self.span(from, index));
                     start = None;
                 }
                 _ => {}
             }
         }
         if let Some(from) = start {
-            push_interval(&mut intervals, self, from, smoothed.len(), options);
+            intervals.push(self.span(from, smoothed.len()));
         }
 
+        // Merging comes first. Two four-second spans either side of a
+        // one-second occlusion are one programme block, and filtering by
+        // duration before joining them would discard both.
         merge_adjacent(intervals, options.merge_gap_seconds)
+            .into_iter()
+            .filter(|interval| interval.duration() >= options.minimum_seconds)
+            .collect()
     }
-}
 
-/// Record an interval if it is long enough to be real.
-fn push_interval(
-    intervals: &mut Vec<LogoInterval>,
-    track: &LogoTrack,
-    from: usize,
-    to: usize,
-    options: &TrackOptions,
-) {
-    let interval = LogoInterval {
-        start: track.time_of(from),
-        end: track.time_of(to),
-    };
-    if interval.duration() >= options.minimum_seconds {
-        intervals.push(interval);
+    /// The interval covering a run of frames.
+    fn span(&self, from: usize, to: usize) -> LogoInterval {
+        LogoInterval {
+            start: self.time_of(from),
+            end: self.time_of(to),
+        }
     }
 }
 
@@ -229,6 +229,45 @@ mod tests {
             1,
             "a caption must not split it: {intervals:?}"
         );
+    }
+
+    #[test]
+    fn two_short_spans_around_a_brief_occlusion_survive_as_one() {
+        // Neither span reaches the two-second minimum on its own, but the
+        // occlusion between them is under a second, so together they are a
+        // legitimate interval. Filtering before merging would lose both.
+        let track = track_from(&[(10.0, 11.8, 0.8), (12.4, 14.2, 0.8)], 30.0);
+        let options = TrackOptions {
+            // Smoothing off, so this exercises merging rather than the median
+            // filter quietly bridging the gap.
+            smoothing_radius: 0,
+            ..TrackOptions::default()
+        };
+
+        let intervals = track.intervals(&options);
+        assert_eq!(intervals.len(), 1, "{intervals:?}");
+        assert!((intervals[0].start - 10.0).abs() < 0.1, "{intervals:?}");
+        assert!((intervals[0].end - 14.2).abs() < 0.1, "{intervals:?}");
+    }
+
+    #[test]
+    fn a_short_span_with_no_neighbour_is_still_discarded() {
+        let track = track_from(&[(10.0, 11.0, 0.8)], 30.0);
+        let options = TrackOptions {
+            smoothing_radius: 0,
+            ..TrackOptions::default()
+        };
+        assert!(track.intervals(&options).is_empty());
+    }
+
+    #[test]
+    fn an_absurd_smoothing_radius_is_clamped_rather_than_overflowing() {
+        let track = LogoTrack {
+            seconds_per_frame: 1.0 / 30.0,
+            scores: vec![0.5; 10],
+        };
+        let smoothed = track.smoothed(usize::MAX);
+        assert_eq!(smoothed.len(), 10);
     }
 
     #[test]

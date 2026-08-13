@@ -55,9 +55,28 @@ impl Rect {
     }
 
     /// Whether the rectangle fits entirely inside a frame of this size.
+    ///
+    /// The addition is checked: a logo file is untrusted input, and an `x`
+    /// near `u32::MAX` would otherwise wrap and report a rectangle far outside
+    /// the frame as fitting inside it.
     #[must_use]
     pub const fn fits_within(&self, width: u32, height: u32) -> bool {
-        self.x + self.width <= width && self.y + self.height <= height
+        let (Some(right), Some(bottom)) = (
+            self.x.checked_add(self.width),
+            self.y.checked_add(self.height),
+        ) else {
+            return false;
+        };
+        right <= width && bottom <= height
+    }
+
+    /// Whether the rectangle has a non-zero area and does not overflow.
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        self.width > 0
+            && self.height > 0
+            && self.x.checked_add(self.width).is_some()
+            && self.y.checked_add(self.height).is_some()
     }
 
     /// Grow by `margin` on every side, clamped to the frame.
@@ -126,6 +145,17 @@ impl LogoData {
         (-b / (a - 1.0)).clamp(0.0, 1.0)
     }
 
+    /// Whether this logo was learned from frames of the given size.
+    ///
+    /// A logo is only meaningful at the resolution it was learned at: the
+    /// rectangle is in pixels, so reusing a 1920x1080 logo on 1440x1080
+    /// broadcast samples the wrong part of the picture entirely and reports
+    /// the logo absent for the whole recording.
+    #[must_use]
+    pub const fn matches_frame_size(&self, width: u32, height: u32) -> bool {
+        self.source_width == width && self.source_height == height
+    }
+
     /// Remove the logo from an observed value, recovering the background.
     #[must_use]
     pub fn remove(&self, index: usize, observed: f32) -> f32 {
@@ -133,6 +163,24 @@ impl LogoData {
             return observed;
         };
         a.mul_add(observed, b)
+    }
+
+    /// Force every coefficient to describe a physically possible logo.
+    ///
+    /// The model implies `a = 1/(1-alpha)` with `alpha` in `0..1`, so `a` is
+    /// always at least 1. Noise in the fit can produce values below that, and
+    /// even negative ones; left alone they still transform pixels in `remove`
+    /// and `apply`, where a negative slope inverts the picture and manufactures
+    /// a strong synthetic edge that then dominates feature selection.
+    ///
+    /// Anything outside the physical range is rewritten as "no logo here".
+    pub fn canonicalise(&mut self) {
+        for (a, b) in self.a.iter_mut().zip(self.b.iter_mut()) {
+            if !a.is_finite() || !b.is_finite() || *a < 1.0 {
+                *a = 1.0;
+                *b = 0.0;
+            }
+        }
     }
 
     /// Composite the logo onto a background value.
@@ -228,10 +276,23 @@ impl LogoData {
     /// [`Error::LogoDecode`] if the body is malformed.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         let body = bytes.strip_prefix(MAGIC).ok_or(Error::LogoFormat)?;
-        let logo: Self = postcard::from_bytes(body).map_err(Error::LogoDecode)?;
-        if logo.a.len() != logo.rect.area() || logo.b.len() != logo.rect.area() {
+        let mut logo: Self = postcard::from_bytes(body).map_err(Error::LogoDecode)?;
+
+        // A logo file may have been produced by another version, copied from a
+        // logo pack, or simply be corrupt. Every downstream stage indexes by
+        // the rectangle and does arithmetic on the coefficients, so both are
+        // checked here rather than trusted.
+        if !logo.rect.is_valid()
+            || !logo.rect.fits_within(logo.source_width, logo.source_height)
+            || logo.a.len() != logo.rect.area()
+            || logo.b.len() != logo.rect.area()
+        {
             return Err(Error::LogoGeometry);
         }
+
+        // Non-finite coefficients would propagate a NaN into every frame score
+        // and silently disable detection for the whole recording.
+        logo.canonicalise();
         Ok(logo)
     }
 
@@ -351,6 +412,85 @@ mod tests {
             LogoData::from_bytes(&bytes),
             Err(Error::LogoGeometry)
         ));
+    }
+
+    #[test]
+    fn nonphysical_slopes_are_rewritten_as_no_logo() {
+        let mut logo = uniform_logo(0.4, 0.9, 4, 4);
+        // Noise in the fit can produce a slope below one, or a negative one;
+        // left alone, `remove` would still transform — and a negative slope
+        // inverts the picture, manufacturing an edge that is not there.
+        logo.a[0] = -3.0;
+        logo.b[0] = 0.2;
+        logo.a[1] = 0.5;
+        logo.a[2] = f32::NAN;
+
+        logo.canonicalise();
+
+        for index in 0..3 {
+            assert_relative_eq!(logo.a[index], 1.0);
+            assert_relative_eq!(logo.b[index], 0.0);
+            // And the pixel now passes through untouched.
+            assert_relative_eq!(logo.remove(index, 0.42), 0.42);
+            assert_relative_eq!(logo.alpha_at(index), 0.0);
+        }
+        // The healthy pixels are left alone.
+        assert_relative_eq!(logo.alpha_at(3), 0.4, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn a_logo_is_only_valid_at_the_resolution_it_was_learned_at() {
+        let logo = uniform_logo(0.4, 0.9, 8, 8);
+        assert!(logo.matches_frame_size(32, 32));
+        // Reusing a 1920x1080 logo on 1440x1080 broadcast would sample the
+        // wrong pixels entirely.
+        assert!(!logo.matches_frame_size(1440, 1080));
+    }
+
+    #[test]
+    fn a_rectangle_that_would_overflow_does_not_report_as_fitting() {
+        let rect = Rect {
+            x: u32::MAX - 1,
+            y: 0,
+            width: 100,
+            height: 10,
+        };
+        assert!(!rect.fits_within(u32::MAX, u32::MAX));
+        assert!(!rect.is_valid());
+
+        let empty = Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 10,
+        };
+        assert!(!empty.is_valid());
+    }
+
+    #[test]
+    fn a_logo_whose_rectangle_escapes_its_source_frame_is_rejected() {
+        let mut logo = uniform_logo(0.4, 0.9, 4, 4);
+        logo.source_width = 2;
+        logo.source_height = 2;
+        let bytes = logo.to_bytes().expect("encodes");
+        assert!(matches!(
+            LogoData::from_bytes(&bytes),
+            Err(Error::LogoGeometry)
+        ));
+    }
+
+    #[test]
+    fn loading_scrubs_non_finite_coefficients() {
+        let mut logo = uniform_logo(0.4, 0.9, 4, 4);
+        logo.a[5] = f32::INFINITY;
+        logo.b[5] = f32::NAN;
+
+        let bytes = logo.to_bytes().expect("encodes");
+        let loaded = LogoData::from_bytes(&bytes).expect("decodes");
+
+        assert!(loaded.a.iter().all(|v| v.is_finite()));
+        assert!(loaded.b.iter().all(|v| v.is_finite()));
+        assert_relative_eq!(loaded.alpha_at(5), 0.0);
     }
 
     #[test]

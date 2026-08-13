@@ -44,13 +44,18 @@ const KERNEL_RADIUS: u32 = 2;
 const LEVELS: usize = 32;
 
 /// Fraction of the logo rectangle used as correlation points.
-const MASK_RATIO: f32 = 0.25;
+///
+/// Matches the density Amatsukaze uses in production. Fewer points make the
+/// per-frame score noisier, which moves where the presence thresholds have to
+/// sit; the two are calibrated together.
+const MASK_RATIO: f32 = 0.35;
 
 /// Ceiling on correlation points, to bound the per-frame cost.
 ///
-/// A large rectangle would otherwise make scoring quadratic in logo size for
-/// no gain: the edges carry the signal, and there are only so many of them.
-const MAX_MASK_POINTS: usize = 1500;
+/// The edges carry the signal and there are only so many of them, so a very
+/// large rectangle gains nothing from more points while costing time on every
+/// frame of a three-hour recording. Set well above what a real logo produces.
+const MAX_MASK_POINTS: usize = 4000;
 
 /// Correlations below this fraction of the average are treated as carrying no
 /// logo information, and are faded out rather than amplified by normalisation.
@@ -177,7 +182,13 @@ impl LogoDetector {
     /// confidently absent, near zero when the frame carries no information.
     pub fn score(&mut self, frame: &asaborake_media::Frame<'_>) -> f32 {
         let rect = self.logo.rect;
-        if !rect.fits_within(frame.width, frame.height) {
+        // The rectangle is in pixels at the resolution the logo was learned
+        // at. A frame of any other size would be sampled in the wrong place,
+        // and the result would look like a confident absence rather than an
+        // error, so refuse instead.
+        if !self.logo.matches_frame_size(frame.width, frame.height)
+            || !rect.fits_within(frame.width, frame.height)
+        {
             return 0.0;
         }
 

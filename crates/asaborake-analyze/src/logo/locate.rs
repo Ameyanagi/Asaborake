@@ -30,8 +30,13 @@ const EDGE_BAND: f32 = 0.28;
 /// Fewest frames before a location is trusted.
 const MINIMUM_FRAMES: u32 = 100;
 
-/// A candidate region must be at least this many pixels to be a logo.
+/// A cluster must cover at least this many pixels to be a logo.
 const MINIMUM_AREA: usize = 64;
+
+/// A single connected blob must cover at least this many pixels to join a
+/// cluster. Lower than [`MINIMUM_AREA`], because one stroke of a character is
+/// small on its own and only meaningful alongside the others.
+const MINIMUM_BLOB_AREA: usize = 8;
 
 /// A candidate region wider or taller than this fraction of the frame is
 /// scenery, not a logo.
@@ -117,7 +122,12 @@ impl LogoLocator {
         }
         let threshold = peak * 0.45;
 
-        let mut best: Option<(usize, Rect)> = None;
+        // Collect every above-threshold blob, not just the largest. A station
+        // mark is routinely several disconnected glyphs — a symbol beside
+        // kanji, or characters that never touch — and four-connectivity
+        // separates them. Taking only the biggest would learn one glyph and
+        // leave the rest of the logo unmodelled.
+        let mut blobs: Vec<(usize, Rect)> = Vec::new();
         let mut visited = vec![false; scores.len()];
         for y in self.rows() {
             for x in 1..self.width - 1 {
@@ -130,18 +140,48 @@ impl LogoLocator {
                     continue;
                 }
                 let (area, rect) = self.flood(&scores, &mut visited, x, y, threshold);
-                if area >= MINIMUM_AREA
-                    && self.is_logo_shaped(rect)
-                    && best.as_ref().is_none_or(|(seen, _)| area > *seen)
-                {
-                    best = Some((area, rect));
+                if area >= MINIMUM_BLOB_AREA {
+                    blobs.push((area, rect));
                 }
             }
         }
 
+        let cluster = self.best_cluster(&blobs)?;
+
         // The scanner needs a border of clean background around the logo to
         // read the background colour from, so the region is grown a little.
-        best.map(|(_, rect)| rect.expanded(4, self.width, self.height))
+        Some(cluster.expanded(4, self.width, self.height))
+    }
+
+    /// Group nearby blobs and return the bounding box of the strongest group.
+    ///
+    /// Glyphs of one logo sit close together; an unrelated static element
+    /// elsewhere in the band does not. Merging by proximity recovers the whole
+    /// mark without swallowing the rest of the frame.
+    fn best_cluster(&self, blobs: &[(usize, Rect)]) -> Option<Rect> {
+        let gap = (self.width / 24).max(8);
+
+        let mut clusters: Vec<(usize, Rect)> = Vec::new();
+        for &(area, rect) in blobs {
+            // Merge into every cluster this blob is close to, since one blob
+            // can bridge two groups that were previously separate.
+            let mut merged = (area, rect);
+            clusters.retain(|&(other_area, other_rect)| {
+                if near(merged.1, other_rect, gap) {
+                    merged = (merged.0 + other_area, union(merged.1, other_rect));
+                    false
+                } else {
+                    true
+                }
+            });
+            clusters.push(merged);
+        }
+
+        clusters
+            .into_iter()
+            .filter(|&(area, rect)| area >= MINIMUM_AREA && self.is_logo_shaped(rect))
+            .max_by_key(|&(area, _)| area)
+            .map(|(_, rect)| rect)
     }
 
     /// Mean edge strength divided by its standard deviation, per pixel.
@@ -224,6 +264,29 @@ impl LogoLocator {
     }
 }
 
+/// Whether two rectangles are within `gap` pixels of each other.
+fn near(a: Rect, b: Rect, gap: u32) -> bool {
+    let horizontal =
+        a.x <= b.x + b.width + gap && b.x <= a.x.saturating_add(a.width).saturating_add(gap);
+    let vertical =
+        a.y <= b.y + b.height + gap && b.y <= a.y.saturating_add(a.height).saturating_add(gap);
+    horizontal && vertical
+}
+
+/// The smallest rectangle containing both.
+fn union(a: Rect, b: Rect) -> Rect {
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    let right = (a.x + a.width).max(b.x + b.width);
+    let bottom = (a.y + a.height).max(b.y + b.height);
+    Rect {
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
+    }
+}
+
 /// Sobel-style gradient magnitude at a pixel, as a plain sum of absolute
 /// differences — cheap, and enough to tell an edge from a flat area.
 fn edge_strength(frame: &Frame<'_>, x: u32, y: u32) -> f32 {
@@ -301,6 +364,54 @@ mod tests {
         assert!(
             found.y + found.height >= logo.y + logo.height,
             "found {found:?}"
+        );
+        assert!(found.fits_within(W, H));
+    }
+
+    #[test]
+    fn a_logo_made_of_separate_glyphs_is_found_whole() {
+        // Japanese station marks are routinely several disconnected pieces —
+        // a symbol beside characters that never touch. Taking only the largest
+        // connected blob would learn one glyph and miss the rest.
+        let glyphs = [
+            Rect {
+                x: 10,
+                y: 6,
+                width: 8,
+                height: 10,
+            },
+            Rect {
+                x: 22,
+                y: 6,
+                width: 8,
+                height: 10,
+            },
+            Rect {
+                x: 34,
+                y: 6,
+                width: 8,
+                height: 10,
+            },
+        ];
+
+        let mut locator = LogoLocator::new(W, H);
+        for step in 0..200 {
+            let mut luma = content(step, None);
+            for rect in &glyphs {
+                for y in rect.y..rect.y + rect.height {
+                    for x in rect.x..rect.x + rect.width {
+                        luma[(y * W + x) as usize] = 255;
+                    }
+                }
+            }
+            locator.add_frame(&frame(&luma));
+        }
+
+        let found = locator.finish().expect("a logo region");
+        assert!(found.x <= 10, "should reach the first glyph: {found:?}");
+        assert!(
+            found.x + found.width >= 42,
+            "should reach the last glyph: {found:?}"
         );
         assert!(found.fits_within(W, H));
     }

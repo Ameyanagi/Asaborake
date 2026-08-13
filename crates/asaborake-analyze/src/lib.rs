@@ -268,7 +268,30 @@ struct Detected {
     scene_changes: Vec<SceneChange>,
 }
 
-/// Locate and learn a logo, in two decimated passes.
+/// Score above which a bootstrap detector is taken to have seen the logo.
+///
+/// Deliberately low. The bootstrap fit is the weaker of the two, so its scores
+/// are muted; gating hard on it would reject the very frames the refinement
+/// needs.
+const REFINEMENT_GATE: f32 = 0.25;
+
+/// Locate and learn a logo.
+///
+/// # Why three passes
+///
+/// The first finds where the logo is. The second fits it from every
+/// flat-background frame — but a recording's flat frames include the fades
+/// inside its *commercials*, where there is no logo at all. Those frames say
+/// "observed equals background", which is a different relationship from the
+/// one being fitted, and mixing the two drags the estimated opacity toward
+/// zero. On a recording that is a third commercials the fit can come out at a
+/// third of the true opacity, weak enough to be rejected outright.
+///
+/// So the third pass uses the second's result to judge which flat frames
+/// actually carried the logo, and refits from those alone. Amatsukaze does the
+/// same, for the same reason.
+///
+/// A logo from the store skips all three.
 fn learn_logo(
     ffmpeg: &Ffmpeg,
     input: &Path,
@@ -280,27 +303,10 @@ fn learn_logo(
     let Some(video) = probe.video.as_ref() else {
         return Ok(None);
     };
-
     let mut locator = LogoLocator::new(video.width, video.height);
-    let mut reader = FrameReader::open(
-        ffmpeg,
-        input,
-        probe,
-        &FrameReaderOptions {
-            deinterlace: options.deinterlace,
-            select_every: options.locate_step,
-            ..FrameReaderOptions::default()
-        },
-    )
-    .map_err(Error::Media)?;
-
+    let mut reader = open_reader(ffmpeg, input, probe, options, options.locate_step)?;
     while let Some(frame) = reader.next_frame().map_err(Error::Media)? {
-        if frame.index.is_multiple_of(64) {
-            on_progress(AnalysisProgress {
-                stage: Stage::LocatingLogo,
-                fraction: fraction_of(frame.timestamp, duration),
-            });
-        }
+        report(&frame, Stage::LocatingLogo, duration, on_progress);
         locator.add_frame(&frame);
     }
     drop(reader);
@@ -311,34 +317,136 @@ fn learn_logo(
     };
     tracing::info!(?rect, "located a candidate logo region");
 
+    let Some(bootstrap) = scan_pass(
+        ffmpeg,
+        input,
+        probe,
+        options,
+        rect,
+        None,
+        duration,
+        on_progress,
+    )?
+    else {
+        tracing::info!("no logo could be fitted from the flat-background frames");
+        return Ok(None);
+    };
+    tracing::debug!(
+        alpha = bootstrap.mean_alpha(),
+        frames = bootstrap.frames_used,
+        "bootstrap logo fitted"
+    );
+
+    let Some(mut gate) = LogoDetector::new(bootstrap.clone()) else {
+        return Ok(Some(bootstrap));
+    };
+    let refined = scan_pass(
+        ffmpeg,
+        input,
+        probe,
+        options,
+        rect,
+        Some(&mut gate),
+        duration,
+        on_progress,
+    )?;
+
+    match refined {
+        Some(logo) => {
+            tracing::info!(
+                alpha = logo.mean_alpha(),
+                frames = logo.frames_used,
+                "refined logo from logo-present frames only"
+            );
+            Ok(Some(logo))
+        }
+        // Refinement can reject every frame if the bootstrap was too weak to
+        // recognise its own logo. The bootstrap is still the best available.
+        None => Ok(Some(bootstrap)),
+    }
+}
+
+/// One learning pass, optionally admitting only frames a detector accepts.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "an internal pass over an already-decomposed pipeline"
+)]
+fn scan_pass(
+    ffmpeg: &Ffmpeg,
+    input: &Path,
+    probe: &MediaProbe,
+    options: &AnalysisOptions,
+    rect: Rect,
+    mut gate: Option<&mut LogoDetector>,
+    duration: f64,
+    on_progress: &mut dyn FnMut(AnalysisProgress),
+) -> Result<Option<LogoData>, Error> {
+    let Some(video) = probe.video.as_ref() else {
+        return Ok(None);
+    };
+
+    let is_bootstrap = gate.is_none();
     let mut scanner = LogoScanner::new(rect, logo::DEFAULT_FLATNESS_THRESHOLD);
-    let mut reader = FrameReader::open(
+    let mut reader = open_reader(ffmpeg, input, probe, options, options.learn_step)?;
+
+    while let Some(frame) = reader.next_frame().map_err(Error::Media)? {
+        report(&frame, Stage::LearningLogo, duration, on_progress);
+        if let Some(gate) = gate.as_mut()
+            && gate.score(&frame) < REFINEMENT_GATE
+        {
+            continue;
+        }
+        scanner.add_frame(&frame);
+    }
+
+    let name = options.logo_name.clone();
+    let channel = options.channel_id.clone();
+    let size = (video.width, video.height);
+
+    // The bootstrap is allowed to be a poor logo — it only has to be good
+    // enough to recognise its own frames. The refined fit is held to the bar
+    // that decides whether a logo is usable at all.
+    Ok(if is_bootstrap {
+        scanner.finish_bootstrap(name, channel, size)
+    } else {
+        scanner.finish(name, channel, size)
+    })
+}
+
+/// Open a frame reader with the analysis pass's shared settings.
+fn open_reader(
+    ffmpeg: &Ffmpeg,
+    input: &Path,
+    probe: &MediaProbe,
+    options: &AnalysisOptions,
+    step: u32,
+) -> Result<FrameReader, Error> {
+    FrameReader::open(
         ffmpeg,
         input,
         probe,
         &FrameReaderOptions {
             deinterlace: options.deinterlace,
-            select_every: options.learn_step,
+            select_every: step,
             ..FrameReaderOptions::default()
         },
     )
-    .map_err(Error::Media)?;
+    .map_err(Error::Media)
+}
 
-    while let Some(frame) = reader.next_frame().map_err(Error::Media)? {
-        if frame.index.is_multiple_of(64) {
-            on_progress(AnalysisProgress {
-                stage: Stage::LearningLogo,
-                fraction: fraction_of(frame.timestamp, duration),
-            });
-        }
-        scanner.add_frame(&frame);
+/// Report progress every so often, rather than on every frame.
+fn report(
+    frame: &asaborake_media::Frame<'_>,
+    stage: Stage,
+    duration: f64,
+    on_progress: &mut dyn FnMut(AnalysisProgress),
+) {
+    if frame.index.is_multiple_of(64) {
+        on_progress(AnalysisProgress {
+            stage,
+            fraction: fraction_of(frame.timestamp, duration),
+        });
     }
-
-    Ok(scanner.finish(
-        options.logo_name.clone(),
-        options.channel_id.clone(),
-        (video.width, video.height),
-    ))
 }
 
 /// Score every frame against the logo while detecting cuts in the same pass.

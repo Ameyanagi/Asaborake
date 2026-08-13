@@ -136,7 +136,9 @@ impl LogoScanner {
 
     /// Offer a frame; returns whether its background was flat enough to use.
     pub fn add_frame(&mut self, frame: &Frame<'_>) -> bool {
-        if !self.rect.fits_within(frame.width, frame.height) {
+        // A degenerate rectangle would underflow when the border is walked,
+        // and it can reach here from a hand-written configuration.
+        if !self.rect.is_valid() || !self.rect.fits_within(frame.width, frame.height) {
             return false;
         }
         let Some(background) = self.flat_background(frame) else {
@@ -209,6 +211,33 @@ impl LogoScanner {
         channel_id: Option<String>,
         frame_size: (u32, u32),
     ) -> Option<LogoData> {
+        self.fit(name, channel_id, frame_size, true)
+    }
+
+    /// Solve without insisting the result looks like a real logo.
+    ///
+    /// A fit taken from every flat frame is diluted by the ones that carried
+    /// no logo — the fades inside the commercials — and on a recording with
+    /// many of those it can fall below the plausibility bar entirely. It is
+    /// still good enough to tell which frames had the logo, which is all the
+    /// refinement pass needs it for. The refined fit is held to the full bar.
+    #[must_use]
+    pub fn finish_bootstrap(
+        &self,
+        name: String,
+        channel_id: Option<String>,
+        frame_size: (u32, u32),
+    ) -> Option<LogoData> {
+        self.fit(name, channel_id, frame_size, false)
+    }
+
+    fn fit(
+        &self,
+        name: String,
+        channel_id: Option<String>,
+        frame_size: (u32, u32),
+        require_plausible: bool,
+    ) -> Option<LogoData> {
         if self.frames < MINIMUM_FRAMES {
             tracing::debug!(
                 frames = self.frames,
@@ -256,7 +285,7 @@ impl LogoScanner {
             }
         }
 
-        let logo = LogoData {
+        let mut logo = LogoData {
             name,
             channel_id,
             source_width: frame_size.0,
@@ -267,7 +296,16 @@ impl LogoScanner {
             frames_used: self.frames,
         };
 
-        logo.is_plausible().then_some(logo)
+        // Noise can fit a slope the compositing model cannot produce. Those
+        // pixels must be neutralised here rather than at each use, or a
+        // negative slope would invert the picture in `remove` and manufacture
+        // an edge for the detector to lock onto.
+        logo.canonicalise();
+
+        if require_plausible && !logo.is_plausible() {
+            return None;
+        }
+        Some(logo)
     }
 }
 
@@ -285,8 +323,11 @@ fn interquartile_mean(sorted: &[u8]) -> u8 {
     if slice.is_empty() {
         return sorted.get(n / 2).copied().unwrap_or(0);
     }
+    let count = slice.len() as u32;
     let total: u32 = slice.iter().map(|&v| u32::from(v)).sum();
-    (total / slice.len() as u32).min(255) as u8
+    // Round to nearest rather than flooring: a consistent half-level bias in
+    // the background estimate shifts the fitted intercept for every pixel.
+    ((total + count / 2) / count).min(255) as u8
 }
 
 #[cfg(test)]
@@ -446,6 +487,69 @@ mod tests {
                 .finish("empty".into(), None, (FRAME_W, FRAME_H))
                 .is_none(),
             "flat frames without a logo must not produce one"
+        );
+    }
+
+    #[test]
+    fn refitting_from_logo_present_frames_only_recovers_the_true_opacity() {
+        use crate::logo::detect::LogoDetector;
+
+        let (alpha, colour) = (0.5f32, 0.9f32);
+        let backgrounds = [10u8, 60, 120, 200];
+
+        // A real recording's flat frames are a mixture: the programme fades
+        // to black carrying its logo, and so do the commercials, which do not.
+        // Three frames in five here carry the logo.
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        for round in 0..60u32 {
+            for &background in &backgrounds {
+                let shifted = background.saturating_add((round % 3) as u8);
+                let present = round % 5 < 3;
+                let logo_alpha = if present { alpha } else { 0.0 };
+                frames.push(synthetic_frame(shifted, logo_alpha, colour, 0));
+            }
+        }
+
+        let r = rect();
+        let centre = ((r.height / 2) * r.width + r.width / 2) as usize;
+
+        // Fitting from everything mixes two different relationships — the
+        // compositing line, and plain "observed equals background" — and drags
+        // the estimate toward zero.
+        let mut bootstrap = LogoScanner::new(r, DEFAULT_FLATNESS_THRESHOLD);
+        for luma in &frames {
+            bootstrap.add_frame(&frame(luma));
+        }
+        let bootstrap = bootstrap
+            .finish_bootstrap("bootstrap".into(), None, (FRAME_W, FRAME_H))
+            .expect("a bootstrap fit");
+        let contaminated = bootstrap.alpha_at(centre);
+        assert!(
+            contaminated < alpha - 0.08,
+            "the mixed fit should understate opacity, got {contaminated} against {alpha}"
+        );
+
+        // Refitting from only the frames the bootstrap recognises recovers it.
+        let mut gate = LogoDetector::new(bootstrap).expect("a usable bootstrap detector");
+        let mut refined = LogoScanner::new(r, DEFAULT_FLATNESS_THRESHOLD);
+        for luma in &frames {
+            let candidate = frame(luma);
+            if gate.score(&candidate) >= 0.25 {
+                refined.add_frame(&candidate);
+            }
+        }
+        let refined = refined
+            .finish("refined".into(), None, (FRAME_W, FRAME_H))
+            .expect("a refined fit");
+
+        let recovered = refined.alpha_at(centre);
+        assert!(
+            (recovered - alpha).abs() < 0.08,
+            "refined opacity {recovered} should be close to {alpha} (bootstrap gave {contaminated})"
+        );
+        assert!(
+            recovered > contaminated,
+            "refinement must improve on the bootstrap"
         );
     }
 

@@ -117,7 +117,12 @@ impl SceneDetector {
     }
 }
 
-/// Whether a value is at least as large as its immediate neighbours.
+/// Whether a value is the peak of its immediate neighbourhood.
+///
+/// The comparison is strict on one side only. Requiring `>=` on both would
+/// report every sample of a flat-topped peak, so two consecutive frames with
+/// identical differences would emit two cuts half a frame apart; requiring `>`
+/// on both would report none at all.
 fn is_local_peak(values: &[f32], index: usize) -> bool {
     let value = values.get(index).copied().unwrap_or(0.0);
     let before = index
@@ -126,7 +131,7 @@ fn is_local_peak(values: &[f32], index: usize) -> bool {
         .copied()
         .unwrap_or(0.0);
     let after = values.get(index + 1).copied().unwrap_or(0.0);
-    value >= before && value >= after
+    value > before && value >= after
 }
 
 /// Median of the values around `index`, excluding `index` itself.
@@ -275,6 +280,19 @@ mod tests {
         let values = vec![0.0f32, 5.0, 20.0, 5.0, 0.0];
         assert!(is_local_peak(&values, 2));
         assert!(!is_local_peak(&values, 1));
+        assert!(!is_local_peak(&values, 3));
+    }
+
+    #[test]
+    fn a_flat_topped_peak_reports_one_cut_not_two() {
+        // Two consecutive frames with identical differences are one cut, and
+        // reporting both would place two boundaries a frame apart.
+        let values = vec![0.0f32, 5.0, 20.0, 20.0, 5.0, 0.0];
+        let peaks = (0..values.len())
+            .filter(|&i| is_local_peak(&values, i))
+            .count();
+        assert_eq!(peaks, 1, "a plateau must yield a single peak");
+        assert!(is_local_peak(&values, 2), "the first of the plateau wins");
         assert!(!is_local_peak(&values, 3));
     }
 }

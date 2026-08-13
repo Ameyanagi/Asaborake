@@ -1,0 +1,30 @@
+# NVENC HEVC at 1080p, for archiving rather than casual viewing.
+name = "nvenc-hevc"
+description = "HEVC on NVENC at up to 1080p. Smaller files, less compatible."
+container = "mp4"
+
+[video]
+encoder = "hevc_nvenc"
+max_height = 1080
+args = [
+    "-preset", "p5",
+    "-tune", "hq",
+    "-rc", "vbr",
+    "-cq", "26",
+    "-b:v", "0",
+    "-profile:v", "main",
+    "-bf", "3",
+    "-spatial-aq", "1",
+    # HEVC in MP4 needs the hvc1 tag to play on Apple devices; without it the
+    # file is valid and silently unplayable there.
+    "-tag:v", "hvc1",
+]
+
+[audio]
+encoder = "aac"
+channels = 2
+sample_rate = 48000
+args = ["-b:a", "192k"]
+
+[filters]
+deinterlace = "bwdif=mode=send_frame:parity=auto:deint=all"
