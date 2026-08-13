@@ -40,6 +40,14 @@ pub struct Config {
     /// How many jobs to run at once.
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,
+    /// What to do when the commercials cannot be found confidently.
+    ///
+    /// `keep` transcodes the whole recording, which is the safe default.
+    /// `block` holds the job instead, so it can be run again once the
+    /// channel's logo has been taught rather than quietly producing an uncut
+    /// file nobody notices.
+    #[serde(default = "default_low_confidence")]
+    pub on_low_confidence: asaborake_cmcut::LowConfidencePolicy,
     /// Directories the logo tool may read recordings from.
     ///
     /// The engine serves frames out of these so a browser can show what a
@@ -56,6 +64,9 @@ pub struct Config {
     pub ffprobe: Option<PathBuf>,
 }
 
+const fn default_low_confidence() -> asaborake_cmcut::LowConfidencePolicy {
+    asaborake_cmcut::LowConfidencePolicy::Keep
+}
 fn default_listen() -> String {
     // Loopback by default. The engine has no authentication of its own; the
     // web app is what faces the network, and it proxies to this.
@@ -80,6 +91,7 @@ impl Default for Config {
             database: default_database(),
             logo_dir: default_logo_dir(),
             concurrency: default_concurrency(),
+            on_low_confidence: default_low_confidence(),
             recording_dirs: Vec::new(),
             ffmpeg: None,
             ffprobe: None,

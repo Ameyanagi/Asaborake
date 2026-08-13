@@ -12,7 +12,9 @@ export type JobStatus =
   | "running"
   | "completed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  /** Waiting for the channel's logo to be taught. Not a failure. */
+  | "blocked";
 
 /** One job in the queue. */
 export interface Job {

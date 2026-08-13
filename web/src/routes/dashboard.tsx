@@ -161,6 +161,8 @@ function StatusLamp({ status }: { status: JobStatus }) {
     completed: { colour: "var(--color-good)", label: "done" },
     failed: { colour: "var(--color-alert)", label: "failed" },
     cancelled: { colour: "var(--color-ink-faint)", label: "stopped" },
+    // Amber rather than red: it is waiting, not broken.
+    blocked: { colour: "var(--color-programme)", label: "needs logo" },
   };
   const { colour, label } = look[status];
 

@@ -158,6 +158,7 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
     request.channel_id.clone_from(&job.channel_id);
     request.channel_name.clone_from(&job.channel_name);
     request.title.clone_from(&job.title);
+    request.cut.low_confidence = context.config.on_low_confidence;
     request.diagnostics = inspect_source(context, &job).await;
 
     // Progress arrives from a blocking thread and has to cross back to the
@@ -241,6 +242,17 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
                 },
             )
             .await;
+        }
+        // Waiting for a logo is not a failure and must not be coloured as
+        // one: nothing went wrong, and the queue is telling you what it needs.
+        Ok(Err(asaborake_core::Error::NeedsLogo)) => {
+            let message = asaborake_core::Error::NeedsLogo.to_string();
+            tracing::info!(job = %job.id, "blocked, waiting for a logo");
+            let _ = context
+                .store
+                .finish(&job.id, JobStatus::Blocked, Some(&message), None, None)
+                .await;
+            log(context, &job.id, "warn", &message).await;
         }
         Ok(Err(error)) => fail(context, &job, &explain(&error)).await,
         // The blocking task itself failed, which means a panic in the

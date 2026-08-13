@@ -194,13 +194,23 @@ export function JobDetail() {
               Stop
             </Action>
           )}
-          {(job.status === "failed" || job.status === "cancelled") && (
+          {(job.status === "failed" ||
+            job.status === "cancelled" ||
+            job.status === "blocked") && (
             <Action onClick={() => void api.retryJob(job.id)}>Run again</Action>
           )}
         </div>
       }
     >
-      {job.error && <Failure message={job.error} />}
+      {/* A blocked job has not failed: it is waiting for something, and
+          colouring it the same red as a failure would teach a reader that
+          both mean the same thing. */}
+      {job.error &&
+        (job.status === "blocked" ? (
+          <Notice messages={[job.error]} />
+        ) : (
+          <Failure message={job.error} />
+        ))}
       {source && <Notice messages={source.warnings} />}
 
       <section className="flex flex-wrap gap-10 border-b border-rule px-6 py-5">
@@ -212,7 +222,7 @@ export function JobDetail() {
               ? "alert"
               : job.status === "completed"
                 ? "good"
-                : job.status === "running"
+                : job.status === "running" || job.status === "blocked"
                   ? "signal"
                   : undefined
           }

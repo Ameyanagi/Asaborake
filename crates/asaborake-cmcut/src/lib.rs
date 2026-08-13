@@ -111,6 +111,14 @@ pub enum LowConfidencePolicy {
     Cut,
     /// Fail the job so a human looks at it.
     Fail,
+    /// Stop and wait for a logo, without transcoding anything.
+    ///
+    /// The point of a queue that runs unattended is that it does not quietly
+    /// produce mediocre results: a recording kept whole because the channel
+    /// has no logo yet is a recording nobody will notice was not cut. Blocked,
+    /// it says what it needs, and teaching the channel's logo is what unblocks
+    /// it. Amatsukaze does the same, and calls the state `LogoPending`.
+    Block,
 }
 
 /// Whether the plan's cuts should be applied.
@@ -681,6 +689,10 @@ fn decide(
             format!("{why}; cutting anyway as configured"),
         ),
         LowConfidencePolicy::Fail => (Decision::KeepAll, format!("{why}; configured to fail")),
+        LowConfidencePolicy::Block => (
+            Decision::KeepAll,
+            format!("{why}; waiting for a logo for this channel"),
+        ),
     }
 }
 

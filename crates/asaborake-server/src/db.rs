@@ -25,6 +25,12 @@ pub enum JobStatus {
     Failed,
     /// Stopped on request.
     Cancelled,
+    /// Waiting for the channel's logo to be taught.
+    ///
+    /// Not a failure: nothing went wrong and nothing needs diagnosing. The job
+    /// is holding because transcoding it now would produce an uncut recording
+    /// that nobody would notice was uncut.
+    Blocked,
 }
 
 impl JobStatus {
@@ -37,6 +43,7 @@ impl JobStatus {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Blocked => "blocked",
         }
     }
 
@@ -53,6 +60,7 @@ impl JobStatus {
             "running" => Self::Running,
             "completed" => Self::Completed,
             "cancelled" => Self::Cancelled,
+            "blocked" => Self::Blocked,
             _ => Self::Failed,
         }
     }
@@ -60,7 +68,10 @@ impl JobStatus {
     /// Whether the job has stopped, one way or another.
     #[must_use]
     pub const fn is_finished(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Blocked
+        )
     }
 }
 
@@ -643,6 +654,37 @@ mod tests {
         assert_eq!(found.status, JobStatus::Failed);
         assert!((found.progress - 0.3).abs() < 1e-9, "progress must be kept");
         assert_eq!(found.error.as_deref(), Some("ffmpeg exited 1"));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_job_is_finished_but_is_not_a_failure() {
+        // It is waiting for a logo. Treating it as failed would put it in the
+        // same bucket as a broken recording, and reading it as unfinished
+        // would have a worker pick it up again immediately.
+        let (store, _dir) = store().await;
+        let id = store.submit(&job("waiting.ts")).await.expect("submits");
+        store.claim_next().await.expect("claims");
+        store
+            .finish(
+                &id,
+                JobStatus::Blocked,
+                Some("no logo is known for this channel"),
+                None,
+                None,
+            )
+            .await
+            .expect("finishes");
+
+        let found = store.get(&id).await.expect("queries").expect("exists");
+        assert_eq!(found.status, JobStatus::Blocked);
+        assert!(found.status.is_finished(), "a worker must not reclaim it");
+        assert_ne!(found.status, JobStatus::Failed);
+
+        // And it round-trips through the database's own spelling.
+        assert_eq!(
+            JobStatus::parse(JobStatus::Blocked.as_str()),
+            JobStatus::Blocked
+        );
     }
 
     #[tokio::test]

@@ -54,6 +54,13 @@ pub enum Error {
         reason: String,
     },
 
+    /// The channel has no logo, and the policy is to wait for one.
+    #[error(
+        "no logo is known for this channel, so the commercials cannot be found; \
+         teach one in the logo tool and run this again"
+    )]
+    NeedsLogo,
+
     /// The source is too damaged to be worth transcoding.
     #[error(
         "the recording is {}% scrambled, so decryption failed and transcoding it \

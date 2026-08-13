@@ -224,13 +224,21 @@ pub fn run(
         "cut plan"
     );
 
-    if plan.decision == Decision::KeepAll
-        && request.cut.low_confidence == LowConfidencePolicy::Fail
-        && plan.confidence < request.cut.confidence_threshold
-    {
-        return Err(Error::LowConfidence {
-            reason: plan.reason.clone(),
-        });
+    if plan.decision == Decision::KeepAll && plan.confidence < request.cut.confidence_threshold {
+        match request.cut.low_confidence {
+            LowConfidencePolicy::Fail => {
+                return Err(Error::LowConfidence {
+                    reason: plan.reason.clone(),
+                });
+            }
+            // Stopping before the encode is the whole point: an hour of GPU
+            // time spent producing an uncut recording is an hour spent
+            // producing something that will have to be done again.
+            LowConfidencePolicy::Block if !analysis.has_logo() => {
+                return Err(Error::NeedsLogo);
+            }
+            _ => {}
+        }
     }
 
     let outputs = encode_parts(
