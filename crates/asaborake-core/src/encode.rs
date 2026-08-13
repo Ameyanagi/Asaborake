@@ -86,7 +86,7 @@ pub fn encode(
     // The chapter file has to outlive the ffmpeg run, so it is kept in scope
     // for the whole function rather than being written inline.
     let chapter_file = write_chapters(request)?;
-    let command = build_command(ffmpeg, request, chapter_file.as_deref())?;
+    let command = build_command(ffmpeg, request, chapter_file.as_deref());
 
     let total = request.output_seconds();
     asaborake_media::run_with_progress(command, |progress: Progress| {
@@ -119,7 +119,7 @@ fn build_command(
     ffmpeg: &Ffmpeg,
     request: &EncodeRequest<'_>,
     chapters: Option<&Path>,
-) -> Result<std::process::Command, Error> {
+) -> std::process::Command {
     let profile = request.profile;
     let interlaced = request.probe.video.as_ref().is_some_and(|v| v.interlaced);
 
@@ -162,7 +162,7 @@ fn build_command(
     command.args(asaborake_media::progress_args());
     command.arg(request.output);
 
-    Ok(command)
+    command
 }
 
 /// Build the `-filter_complex` graph.

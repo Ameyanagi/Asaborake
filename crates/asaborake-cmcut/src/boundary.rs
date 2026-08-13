@@ -243,6 +243,7 @@ mod tests {
             duration_seconds: duration,
             seconds_per_frame: 1.0 / 30.0,
             logo: None,
+            learned_logo: None,
             logo_intervals: logo
                 .iter()
                 .map(|&(start, end)| LogoInterval { start, end })

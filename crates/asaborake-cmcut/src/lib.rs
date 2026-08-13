@@ -731,6 +731,7 @@ mod tests {
         Analysis {
             duration_seconds: duration,
             seconds_per_frame: 1.0 / 30.0,
+            learned_logo: None,
             logo: with_logo.then_some(asaborake_analyze::LogoSummary {
                 rect: asaborake_analyze::Rect {
                     x: 0,
@@ -880,6 +881,7 @@ mod tests {
             duration_seconds: 0.0,
             seconds_per_frame: 0.0,
             logo: None,
+            learned_logo: None,
             logo_intervals: Vec::new(),
             logo_track: None,
             scene_changes: Vec::new(),

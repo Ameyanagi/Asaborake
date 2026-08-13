@@ -5,6 +5,7 @@ members = [
     "crates/asaborake-media",
     "crates/asaborake-analyze",
     "crates/asaborake-cmcut",
+    "crates/asaborake-core",
 ]
 
 [workspace.package]

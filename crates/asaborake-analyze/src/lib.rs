@@ -89,6 +89,13 @@ pub struct Analysis {
     pub seconds_per_frame: f64,
     /// The logo, when one was found.
     pub logo: Option<LogoSummary>,
+    /// The logo itself, when it was learned by this run.
+    ///
+    /// Carried in memory so the caller can add it to the logo store, but never
+    /// serialised: the coefficient maps are hundreds of kilobytes and belong
+    /// in the store's binary form, not in an analysis document.
+    #[serde(skip)]
+    pub learned_logo: Option<LogoData>,
     /// Spans during which the logo was present.
     pub logo_intervals: Vec<LogoInterval>,
     /// The per-frame logo score, retained for the timeline view.
@@ -221,7 +228,7 @@ pub fn analyse(
         .map(|(start, end)| SilentSpan { start, end })
         .collect();
 
-    // A logo from the store skips both learning passes entirely.
+    // A logo from the store skips all three learning passes entirely.
     let (logo, from_store) = match options.logo.clone() {
         Some(stored) => (Some(stored), true),
         None => (
@@ -229,6 +236,7 @@ pub fn analyse(
             false,
         ),
     };
+    let learned_logo = if from_store { None } else { logo.clone() };
 
     let seconds_per_frame = if video.fps() > 0.0 {
         1.0 / video.fps()
@@ -253,6 +261,7 @@ pub fn analyse(
         duration_seconds: duration,
         seconds_per_frame,
         logo: detected.summary,
+        learned_logo,
         logo_intervals: detected.intervals,
         logo_track: detected.track,
         scene_changes: detected.scene_changes,
@@ -598,6 +607,7 @@ mod tests {
             duration_seconds: 100.0,
             seconds_per_frame: 1.0 / 30.0,
             logo: None,
+            learned_logo: None,
             logo_intervals: vec![
                 LogoInterval {
                     start: 0.0,
@@ -622,6 +632,7 @@ mod tests {
             duration_seconds: 0.0,
             seconds_per_frame: 0.0,
             logo: None,
+            learned_logo: None,
             logo_intervals: Vec::new(),
             logo_track: None,
             scene_changes: Vec::new(),

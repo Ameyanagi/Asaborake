@@ -105,9 +105,17 @@ pub struct FilterSettings {
     pub extra: Vec<String>,
 }
 
+/// The deinterlacer a profile uses unless it says otherwise.
+///
+/// Broadcast is 1080i; bwdif is yadif's successor and keeps more of the fine
+/// detail that survives a downscale. Wrapped in an `Option` because the field
+/// it defaults is optional: a profile may set it to nothing to leave
+/// interlaced sources alone.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "serde default for an Option field"
+)]
 fn default_deinterlace() -> Option<String> {
-    // Broadcast is 1080i; bwdif is yadif's successor and keeps more of the
-    // fine detail that survives a downscale.
     Some("bwdif=mode=send_frame:parity=auto:deint=all".to_owned())
 }
 
@@ -239,11 +247,17 @@ mod tests {
     fn deinterlacing_only_applies_to_interlaced_sources() {
         let profile = builtin().remove("x264-cpu").expect("the cpu profile");
         assert!(
-            profile.video_filters(true).iter().any(|f| f.contains("bwdif")),
+            profile
+                .video_filters(true)
+                .iter()
+                .any(|f| f.contains("bwdif")),
             "interlaced sources must be deinterlaced"
         );
         assert!(
-            !profile.video_filters(false).iter().any(|f| f.contains("bwdif")),
+            !profile
+                .video_filters(false)
+                .iter()
+                .any(|f| f.contains("bwdif")),
             "progressive sources must be left alone"
         );
     }
