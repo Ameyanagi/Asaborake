@@ -19,16 +19,21 @@ export function Page({
   aside?: ReactNode | undefined;
   children: ReactNode;
 }) {
+  // A measure, not a full-bleed page. Dense rows read as single units only
+  // while their two ends stay within a glance of each other; stretched across
+  // a wide monitor they fall apart into two disconnected columns.
   return (
     <div className="min-h-full">
-      <header className="flex items-end justify-between gap-6 border-b border-rule px-6 py-5">
-        <div>
-          <h1 className="text-[17px] tracking-[0.06em] text-ink">{title}</h1>
-          {detail && <p className="eyebrow mt-1.5">{detail}</p>}
+      <header className="border-b border-rule">
+        <div className="mx-auto flex max-w-6xl items-end justify-between gap-6 px-6 py-5">
+          <div>
+            <h1 className="text-[17px] tracking-[0.06em] text-ink">{title}</h1>
+            {detail && <p className="eyebrow mt-1.5">{detail}</p>}
+          </div>
+          {aside}
         </div>
-        {aside}
       </header>
-      {children}
+      <div className="mx-auto max-w-6xl">{children}</div>
     </div>
   );
 }

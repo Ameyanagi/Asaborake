@@ -44,6 +44,8 @@ pub struct JobRequest {
     pub channel_name: Option<String>,
     /// Programme title, for logging and the web UI.
     pub title: Option<String>,
+    /// Where the logo is, when it is already known.
+    pub logo_rect: Option<asaborake_analyze::Rect>,
     /// Segmentation tunables.
     pub cut: CutOptions,
     /// Whether to learn and store a logo when the channel has none.
@@ -61,6 +63,7 @@ impl JobRequest {
             channel_id: None,
             channel_name: None,
             title: None,
+            logo_rect: None,
             cut: CutOptions::default(),
             learn_logo: true,
         }
@@ -154,6 +157,7 @@ pub fn run(
             .or_else(|| request.channel_id.clone())
             .unwrap_or_else(|| "unknown".to_owned()),
         channel_id: request.channel_id.clone(),
+        logo_rect: request.logo_rect,
         deinterlace: video.interlaced,
         ..AnalysisOptions::default()
     };

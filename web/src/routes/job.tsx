@@ -227,8 +227,10 @@ export function JobDetail() {
           <ol className="space-y-1">
             {events.map((event) => (
               <li key={event.id} className="flex gap-4">
-                <span className="w-20 shrink-0 tabular-nums text-ink-faint">
-                  {new Date(event.at).toLocaleTimeString()}
+                <span className="w-20 shrink-0 whitespace-nowrap tabular-nums text-ink-faint">
+                  {new Date(event.at).toLocaleTimeString([], {
+                    hour12: false,
+                  })}
                 </span>
                 <span
                   className={

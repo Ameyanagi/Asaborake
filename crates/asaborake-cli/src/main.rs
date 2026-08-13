@@ -139,6 +139,40 @@ struct RecordingContext {
     /// Programme title, for logs and the cut record.
     #[arg(long)]
     title: Option<String>,
+    /// Where the logo is, as `X,Y,WIDTH,HEIGHT` in source pixels.
+    ///
+    /// Skips the search and uses this rectangle. Automatic location has to
+    /// infer from the picture what a person can simply see, so for a channel
+    /// whose logo you have found once, telling Asaborake is more reliable —
+    /// and it is what Amatsukaze asks of its operator.
+    #[arg(long, value_name = "X,Y,W,H", value_parser = parse_rect)]
+    logo_rect: Option<asaborake_analyze::Rect>,
+}
+
+/// Parse an `X,Y,WIDTH,HEIGHT` rectangle.
+fn parse_rect(value: &str) -> Result<asaborake_analyze::Rect, String> {
+    let parts: Vec<&str> = value.split(',').map(str::trim).collect();
+    let [x, y, width, height] = parts.as_slice() else {
+        return Err(format!(
+            "expected four comma-separated numbers as X,Y,WIDTH,HEIGHT, got '{value}'"
+        ));
+    };
+
+    let number = |text: &str, what: &str| -> Result<u32, String> {
+        text.parse::<u32>()
+            .map_err(|_| format!("{what} must be a whole number of pixels, got '{text}'"))
+    };
+
+    let rect = asaborake_analyze::Rect {
+        x: number(x, "x")?,
+        y: number(y, "y")?,
+        width: number(width, "width")?,
+        height: number(height, "height")?,
+    };
+    if !rect.is_valid() {
+        return Err("width and height must both be greater than zero".to_owned());
+    }
+    Ok(rect)
 }
 
 #[derive(Debug, Subcommand)]
@@ -327,6 +361,7 @@ fn analyse(
 
     let options = asaborake_analyze::AnalysisOptions {
         logo: stored,
+        logo_rect: context.logo_rect,
         logo_name: context
             .channel_name
             .clone()
@@ -442,6 +477,7 @@ fn build_request(
     request.channel_id.clone_from(&context.channel_id);
     request.channel_name.clone_from(&context.channel_name);
     request.title.clone_from(&context.title);
+    request.logo_rect = context.logo_rect;
     if no_cut {
         // Detection still runs, and its result still becomes chapters; only
         // the removal is suppressed.
@@ -474,6 +510,9 @@ fn run_epgstation(cli: &Cli, profile_name: &str, no_cut: bool) -> Result<()> {
         channel_id: environment.channel_id.clone(),
         channel_name: environment.channel_name.clone(),
         title: environment.name.clone(),
+        // EPGStation has no notion of a logo rectangle; the channel's stored
+        // logo is what makes a job from it fast.
+        logo_rect: None,
     };
     let request = build_request(&input, &output, profile_name, no_cut, &context)?;
 

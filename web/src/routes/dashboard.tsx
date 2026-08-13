@@ -129,7 +129,7 @@ function JobRow({ job }: { job: Job }) {
       {job.status === "running" && (
         <div className="mt-2 flex items-center gap-3">
           {/* The bar is the row, not a component floating in it. */}
-          <div className="h-[3px] flex-1 bg-rule">
+          <div className="h-[3px] w-64 shrink-0 bg-rule">
             <div
               className="h-full bg-programme transition-[width] duration-500"
               style={{ width: `${Math.round(job.progress * 100)}%` }}
@@ -138,7 +138,7 @@ function JobRow({ job }: { job: Job }) {
           <span className="w-10 shrink-0 text-right tabular-nums text-ink-dim">
             {Math.round(job.progress * 100)}%
           </span>
-          <span className="w-56 shrink-0 truncate text-ink-faint">
+          <span className="min-w-0 flex-1 truncate text-ink-faint">
             {job.message}
           </span>
         </div>

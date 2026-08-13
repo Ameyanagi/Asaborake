@@ -133,6 +133,13 @@ pub struct AnalysisOptions {
     /// one-pass one, which is the difference between minutes and seconds on a
     /// long recording. This is the steady state once a channel has been seen.
     pub logo: Option<LogoData>,
+    /// Where the logo is, when it is already known.
+    ///
+    /// Amatsukaze has the operator draw this rectangle, and for a channel
+    /// whose logo has been located once by hand it is far more reliable than
+    /// finding it again: automatic location has to infer from the picture what
+    /// a person can simply see. Supplying it skips the location pass entirely.
+    pub logo_rect: Option<Rect>,
     /// Name to give a newly learned logo.
     pub logo_name: String,
     /// Channel a newly learned logo belongs to.
@@ -157,6 +164,7 @@ impl Default for AnalysisOptions {
     fn default() -> Self {
         Self {
             logo: None,
+            logo_rect: None,
             logo_name: "unknown".to_owned(),
             channel_id: None,
             deinterlace: true,
@@ -326,19 +334,35 @@ fn learn_logo(
     let Some(video) = probe.video.as_ref() else {
         return Ok(None);
     };
-    let mut locator = LogoLocator::new(video.width, video.height);
-    let mut reader = open_reader(ffmpeg, input, probe, options, options.locate_step)?;
-    while let Some(frame) = reader.next_frame().map_err(Error::Media)? {
-        report(&frame, Stage::LocatingLogo, duration, on_progress);
-        locator.add_frame(&frame);
-    }
-    drop(reader);
+    // A rectangle given by the operator is better evidence than anything the
+    // locator can infer from the picture, so it is used as-is and the location
+    // pass is skipped. One that does not fit the picture is ignored rather
+    // than trusted — a logo file copied from another resolution would
+    // otherwise point the scanner at the wrong part of the frame.
+    let supplied = options.logo_rect.filter(|rect| {
+        let usable = rect.is_valid() && rect.fits_within(video.width, video.height);
+        if !usable {
+            tracing::warn!(
+                ?rect,
+                width = video.width,
+                height = video.height,
+                "the supplied logo rectangle does not fit the picture; locating instead"
+            );
+        }
+        usable
+    });
 
-    let Some(rect) = locator.finish() else {
-        tracing::info!("no logo region found; falling back to logo-free detection");
-        return Ok(None);
+    let rect = if let Some(given) = supplied {
+        tracing::info!(?given, "using the logo rectangle that was supplied");
+        given
+    } else {
+        let Some(found) = locate(ffmpeg, input, probe, options, duration, on_progress)? else {
+            tracing::info!("no logo region found; falling back to logo-free detection");
+            return Ok(None);
+        };
+        tracing::info!(?found, "located a candidate logo region");
+        found
     };
-    tracing::info!(?rect, "located a candidate logo region");
 
     let Some(bootstrap) = scan_pass(
         ffmpeg,
@@ -387,6 +411,29 @@ fn learn_logo(
         // recognise its own logo. The bootstrap is still the best available.
         None => Ok(Some(bootstrap)),
     }
+}
+
+/// Find where the logo is, by scanning the recording.
+fn locate(
+    ffmpeg: &Ffmpeg,
+    input: &Path,
+    probe: &MediaProbe,
+    options: &AnalysisOptions,
+    duration: f64,
+    on_progress: &mut dyn FnMut(AnalysisProgress),
+) -> Result<Option<Rect>, Error> {
+    let Some(video) = probe.video.as_ref() else {
+        return Ok(None);
+    };
+
+    let mut locator = LogoLocator::new(video.width, video.height);
+    let mut reader = open_reader(ffmpeg, input, probe, options, options.locate_step)?;
+    while let Some(frame) = reader.next_frame().map_err(Error::Media)? {
+        report(&frame, Stage::LocatingLogo, duration, on_progress);
+        locator.add_frame(&frame);
+    }
+
+    Ok(locator.finish())
 }
 
 /// One learning pass, optionally admitting only frames a detector accepts.
