@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/asaborake-ts",
     "crates/asaborake-media",
+    "crates/asaborake-analyze",
 ]
 
 [workspace.package]
