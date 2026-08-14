@@ -93,6 +93,12 @@ struct Slots {
     sets: [Charset; 4],
     /// Which slot the 0x21-0x7E range means right now.
     left: usize,
+    /// Which slot the 0xA1-0xFE range means.
+    ///
+    /// Service names lean on this heavily: "NHK総合1・東京" is sent as the
+    /// letters in the high range and the kanji in the low one, so a decoder
+    /// that only reads the low range turns the first half into nonsense.
+    right: usize,
 }
 
 impl Default for Slots {
@@ -107,14 +113,19 @@ impl Default for Slots {
                 Charset::Katakana,
             ],
             left: 0,
+            right: 2,
         }
     }
 }
 
 impl Slots {
-    /// The set printable bytes currently mean.
-    const fn current(self) -> Charset {
-        self.sets[self.left]
+    /// The set a printable byte means, by which half of the range it is in.
+    const fn for_byte(self, byte: u8) -> Charset {
+        if byte >= 0xA1 {
+            self.sets[self.right]
+        } else {
+            self.sets[self.left]
+        }
     }
 
     /// Act on an escape sequence, returning how many bytes it occupied.
@@ -138,7 +149,7 @@ impl Slots {
                 self.sets[usize::from(slot - 0x28)] = Charset::from_designation(*set);
                 2
             }
-            // Locking shift into G2 or G3.
+            // Locking shifts into the low range.
             [0x6E, ..] => {
                 self.left = 2;
                 1
@@ -147,10 +158,39 @@ impl Slots {
                 self.left = 3;
                 1
             }
+            // And into the high range, which is what a service name uses to
+            // put its letters and its kanji in one string.
+            [0x7E, ..] => {
+                self.right = 1;
+                1
+            }
+            [0x7D, ..] => {
+                self.right = 2;
+                1
+            }
+            [0x7C, ..] => {
+                self.right = 3;
+                1
+            }
             _ => 1,
         }
     }
 }
+
+/// Row 1 cells the kana sets borrow for their last eight positions.
+///
+/// In order from 0x77: the iteration marks, the long vowel mark, and the
+/// punctuation. Everything below 0x77 is the kana row itself.
+const KANA_TAIL: [u8; 8] = [
+    0x52, // ゝ
+    0x53, // ゞ
+    0x3C, // ー
+    0x23, // 。
+    0x56, // 「
+    0x57, // 」
+    0x22, // 、
+    0x26, // ・
+];
 
 /// What an unmapped station-defined glyph becomes.
 ///
@@ -239,7 +279,7 @@ pub fn decode_statement(body: &[u8]) -> String {
             _ => {
                 let charset = single_shift
                     .take()
-                    .map_or_else(|| slots.current(), |slot| slots.sets[slot]);
+                    .map_or_else(|| slots.for_byte(byte), |slot| slots.sets[slot]);
                 let bytes_used = if charset.is_two_byte() { 2 } else { 1 };
                 if index + bytes_used > body.len() {
                     break;
@@ -271,14 +311,22 @@ fn push_character(out: &mut String, charset: Charset, bytes: &[u8]) {
             }
         }
         // The single-byte kana sets are rows 4 and 5 of the same standard, so
-        // they decode through the same path with the row supplied.
+        // they decode through the same path with the row supplied — except
+        // for the last eight positions, which ARIB fills with punctuation
+        // borrowed from row 1. The long vowel mark is one of them, and a name
+        // like ディズニージュニア is unreadable without it.
         Charset::Hiragana | Charset::Katakana => {
-            let row = if charset == Charset::Hiragana {
-                0x24
+            let cell = bytes[0] & 0x7F;
+            if let Some(borrowed) = KANA_TAIL.get(cell.wrapping_sub(0x77) as usize) {
+                push_jis(out, 0x21, *borrowed);
             } else {
-                0x25
-            };
-            push_jis(out, row, bytes[0] & 0x7F);
+                let row = if charset == Charset::Hiragana {
+                    0x24
+                } else {
+                    0x25
+                };
+                push_jis(out, row, cell);
+            }
         }
         Charset::Kanji => push_jis(out, bytes[0] & 0x7F, bytes[1] & 0x7F),
     }
@@ -725,6 +773,45 @@ mod tests {
         let mut body = vec![0x19, 0x22];
         body.extend_from_slice(&kanji(&[(0x24, 0x24)]));
         assert_eq!(decode_statement(&body), "あい");
+    }
+
+    #[test]
+    fn the_long_vowel_mark_comes_out_of_the_kana_sets() {
+        // ARIB fills the last eight positions of the kana sets with
+        // punctuation from another row. Without them ディズニージュニア loses
+        // its long vowel and reads as ディズニ〓ジュニア.
+        let body = vec![
+            0x1B, 0x28, 0x32, // designate katakana into G0
+            0x43, 0x24, 0x39, 0x4B, 0x79, // ディズニ + the long vowel
+        ];
+        assert!(
+            decode_statement(&body).ends_with('ー'),
+            "{:?}",
+            decode_statement(&body)
+        );
+
+        // And the punctuation beside it.
+        assert_eq!(decode_statement(&[0x1B, 0x28, 0x32, 0x7E]), "・");
+        assert_eq!(decode_statement(&[0x1B, 0x28, 0x32, 0x7A]), "。");
+    }
+
+    #[test]
+    fn a_service_name_mixes_letters_and_kanji_across_both_halves() {
+        // Taken byte for byte from a real recording's SDT: NHK総合1・東京.
+        // LS1R points the high range at the alphanumeric set, so the letters
+        // arrive with their high bit set while the kanji stay in the low
+        // range. Reading only the low range turned this into 糧冒躪膠・東京.
+        let body = vec![
+            0x1B, 0x7E, // LS1R
+            0xCE, 0xC8, 0xCB, // N H K, in the high range
+            0x41, 0x6D, // 総
+            0x39, 0x67, // 合
+            0xB1, // 1
+            0x21, 0x26, // ・
+            0x45, 0x6C, // 東
+            0x35, 0x7E, // 京
+        ];
+        assert_eq!(decode_statement(&body), "NHK総合1・東京");
     }
 
     #[test]
