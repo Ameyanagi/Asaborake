@@ -24,6 +24,8 @@ export function Dashboard() {
   const [jobs, setJobs] = useState<Job[] | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [only, setOnly] = useState<JobStatus | "all">("all");
 
   useEffect(() => {
     let live = true;
@@ -53,6 +55,18 @@ export function Dashboard() {
   const running = jobs?.filter((job) => job.status === "running").length ?? 0;
   const queued = jobs?.filter((job) => job.status === "queued").length ?? 0;
 
+  // Filtering happens over what is already loaded rather than by asking the
+  // engine again: the whole queue is here, it arrives as a live stream, and a
+  // round trip per keystroke would make the filter lag the typing.
+  const shown = (jobs ?? []).filter((job) => {
+    if (only !== "all" && job.status !== only) return false;
+    if (!search.trim()) return true;
+    const needle = search.trim().toLowerCase();
+    return [job.title, job.input, job.channel_name, job.profile]
+      .filter((field): field is string => Boolean(field))
+      .some((field) => field.toLowerCase().includes(needle));
+  });
+
   return (
     <Page
       title="Queue"
@@ -78,20 +92,75 @@ export function Dashboard() {
       {jobs?.length === 0 && (
         <Empty
           title="Nothing has been transcoded yet"
-          detail="Jobs appear here when EPGStation finishes a recording, or when you submit one over the API."
+          detail="Jobs appear here when EPGStation finishes a recording, or when you submit one from here."
         />
       )}
 
       {jobs && jobs.length > 0 && (
-        <div className="border-t border-rule">
-          {jobs.map((job) => (
-            <JobRow key={job.id} job={job} />
-          ))}
-        </div>
+        <>
+          <div className="flex flex-wrap items-center gap-4 border-b border-rule px-6 py-3">
+            <input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="search title, file, channel or profile"
+              className="w-72 border border-rule-bright bg-panel px-3 py-1.5 text-ink placeholder:text-ink-faint"
+            />
+            <div className="flex flex-wrap gap-1.5">
+              {STATUS_FILTERS.map(({ value, label }) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setOnly(value)}
+                  className={`border px-2.5 py-1 transition-colors ${
+                    only === value
+                      ? "border-programme text-programme"
+                      : "border-rule-bright text-ink-dim hover:text-ink"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {shown.length !== jobs.length && (
+              <span className="tabular-nums text-ink-faint">
+                {shown.length} of {jobs.length}
+              </span>
+            )}
+          </div>
+
+          {shown.length === 0 ? (
+            <Empty
+              title="Nothing matches"
+              detail="No job in the queue matches that search and filter."
+            />
+          ) : (
+            <div className="border-t border-rule">
+              {shown.map((job) => (
+                <JobRow key={job.id} job={job} />
+              ))}
+            </div>
+          )}
+        </>
       )}
     </Page>
   );
 }
+
+/**
+ * The filters worth offering.
+ *
+ * Not one per status: "stopped" and "needs logo" are rare enough that a chip
+ * each would be mostly dead furniture, while "failed" is the one somebody
+ * comes to this screen looking for.
+ */
+const STATUS_FILTERS: { value: JobStatus | "all"; label: string }[] = [
+  { value: "all", label: "all" },
+  { value: "running", label: "running" },
+  { value: "queued", label: "queued" },
+  { value: "completed", label: "done" },
+  { value: "failed", label: "failed" },
+  { value: "blocked", label: "needs logo" },
+];
 
 function Count({
   value,

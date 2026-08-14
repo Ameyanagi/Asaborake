@@ -9,6 +9,7 @@
 //! Profiles are TOML, so a deployment can add one without rebuilding.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -236,6 +237,107 @@ pub fn builtin() -> BTreeMap<String, Profile> {
     profiles
 }
 
+/// Profiles a deployment has added or changed, on top of the shipped ones.
+///
+/// Kept as TOML files in a directory because a profile *is* a TOML document —
+/// the format the engine already parses, and the one an operator can read,
+/// copy and mail to somebody. Editing one in a browser and editing one with a
+/// text editor stay the same act.
+#[derive(Debug, Clone)]
+pub struct ProfileStore {
+    root: PathBuf,
+}
+
+impl ProfileStore {
+    /// Open the store at `root`, which need not exist.
+    #[must_use]
+    pub fn open(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// The file a profile is kept in.
+    ///
+    /// The name arrives over HTTP, so it is sanitised rather than trusted to
+    /// stay inside the directory.
+    fn path(&self, name: &str) -> PathBuf {
+        let safe: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        self.root.join(format!("{safe}.toml"))
+    }
+
+    /// Every profile: the shipped ones, with any stored ones replacing or
+    /// adding to them by name.
+    #[must_use]
+    pub fn all(&self) -> BTreeMap<String, Profile> {
+        let mut profiles = builtin();
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return profiles;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "toml") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            match Profile::from_toml(&text) {
+                Ok(profile) => {
+                    profiles.insert(profile.name.clone(), profile);
+                }
+                // One unreadable file must not hide the rest, and the engine
+                // still has the shipped profiles to work with.
+                Err(error) => {
+                    tracing::warn!(%error, path = %path.display(), "cannot read this profile");
+                }
+            }
+        }
+        profiles
+    }
+
+    /// Store a profile, replacing any of the same name.
+    ///
+    /// # Errors
+    /// Returns [`Error::ProfileParse`] if the document is malformed, or
+    /// [`Error::Io`] if it cannot be written.
+    pub fn save(&self, toml: &str) -> Result<Profile, Error> {
+        // Parsed before it is written, so a document that would break the
+        // engine is refused while somebody is still looking at it.
+        let profile = Profile::from_toml(toml)?;
+        std::fs::create_dir_all(&self.root).map_err(|source| Error::Io {
+            path: self.root.clone(),
+            source,
+        })?;
+        let path = self.path(&profile.name);
+        std::fs::write(&path, toml).map_err(|source| Error::Io { path, source })?;
+        Ok(profile)
+    }
+
+    /// Remove a stored profile, returning whether there was one.
+    ///
+    /// A shipped profile cannot be removed; forgetting an override restores
+    /// whatever it was overriding.
+    ///
+    /// # Errors
+    /// Returns [`Error::Io`] if the file exists and cannot be removed.
+    pub fn remove(&self, name: &str) -> Result<bool, Error> {
+        let path = self.path(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(Error::Io { path, source }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,6 +418,77 @@ mod tests {
     fn containers_know_their_extension_and_muxer() {
         assert_eq!(Container::Mp4.extension(), ".mp4");
         assert_eq!(Container::Mkv.muxer(), "matroska");
+    }
+
+    #[test]
+    fn a_stored_profile_joins_the_shipped_ones() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = ProfileStore::open(dir.path());
+        assert_eq!(store.all().len(), builtin().len());
+
+        let mut custom = builtin().remove("x264-cpu").expect("profile");
+        custom.name = "my-profile".to_owned();
+        store
+            .save(&custom.to_toml().expect("serialises"))
+            .expect("saves");
+
+        let all = store.all();
+        assert_eq!(all.len(), builtin().len() + 1);
+        assert!(all.contains_key("my-profile"));
+        // And the shipped ones are still there.
+        assert!(all.contains_key("x264-cpu"));
+    }
+
+    #[test]
+    fn a_stored_profile_can_replace_a_shipped_one_and_be_taken_back() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = ProfileStore::open(dir.path());
+
+        let mut changed = builtin().remove("x264-cpu").expect("profile");
+        changed.description = "mine".to_owned();
+        store
+            .save(&changed.to_toml().expect("serialises"))
+            .expect("saves");
+        assert_eq!(store.all()["x264-cpu"].description, "mine");
+
+        // Forgetting the override restores what it was overriding, rather
+        // than leaving the engine without that profile.
+        assert!(store.remove("x264-cpu").expect("removes"));
+        assert_ne!(store.all()["x264-cpu"].description, "mine");
+        assert!(!store.remove("x264-cpu").expect("removes"), "already gone");
+    }
+
+    #[test]
+    fn a_document_that_would_break_the_engine_is_refused_before_it_is_written() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = ProfileStore::open(dir.path());
+
+        assert!(store.save("this is not a profile").is_err());
+        assert_eq!(
+            std::fs::read_dir(dir.path()).expect("reads").count(),
+            0,
+            "nothing should have been written"
+        );
+    }
+
+    #[test]
+    fn a_profile_name_cannot_escape_the_store_directory() {
+        // The name comes from inside the document, which arrives over HTTP.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = ProfileStore::open(dir.path());
+
+        let mut nasty = builtin().remove("x264-cpu").expect("profile");
+        nasty.name = "../../etc/passwd".to_owned();
+        store
+            .save(&nasty.to_toml().expect("serialises"))
+            .expect("saves");
+
+        let written: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("reads")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(written, vec!["______etc_passwd.toml"], "{written:?}");
     }
 
     #[test]

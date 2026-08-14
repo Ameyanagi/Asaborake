@@ -166,9 +166,13 @@ or so, M a few days, L a week or more.
 
 15. ~~**Submit a job from the browser.**~~ **Done**: pick a recording, a
     profile and a channel from the queue screen.
-16. **Queue operations** — reorder, priority, duplicate, force-start,
-    delete-with-source, filter and search. **M**
-17. **Profile editor.** Currently read-only. **M**
+16. **Queue operations.** Search and status filtering are ~~done~~; reorder,
+    priority, duplicate, force-start and delete-with-source are not. **M**
+17. ~~**Profile editor.**~~ **Done.** Profiles a deployment adds or changes
+    live as TOML files beside the shipped ones and override them by name;
+    reverting an override restores what it was overriding. Edited as the TOML
+    itself, because a profile *is* a TOML document and a form over it would be
+    a second representation to drift from the first.
 18. **History browser** with the per-job statistics from stage 1. **M**
 19. ~~**Auto-select rule builder.**~~ **Done**, together with the per-channel
     settings panel from stage 3. Both live on one screen, deliberately: a

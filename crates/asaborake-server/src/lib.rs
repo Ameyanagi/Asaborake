@@ -65,6 +65,9 @@ pub struct Config {
     /// television on.
     #[serde(default)]
     pub run_hours: schedule::RunHours,
+    /// Where profiles a deployment has added or changed live.
+    #[serde(default = "default_profile_dir")]
+    pub profile_dir: PathBuf,
     /// Where the auto-selection rules live.
     ///
     /// Tried in file order, first match wins, and a matching rule overrides
@@ -102,6 +105,9 @@ fn default_listen() -> String {
 fn default_database() -> PathBuf {
     PathBuf::from("/var/lib/asaborake/jobs.db")
 }
+fn default_profile_dir() -> PathBuf {
+    PathBuf::from("/var/lib/asaborake/profiles")
+}
 fn default_rules() -> PathBuf {
     PathBuf::from("/var/lib/asaborake/rules.json")
 }
@@ -125,6 +131,7 @@ impl Default for Config {
             logo_dir: default_logo_dir(),
             channels: default_channels(),
             rules: default_rules(),
+            profile_dir: default_profile_dir(),
             run_hours: schedule::RunHours::default(),
             output_template: None,
             concurrency: default_concurrency(),

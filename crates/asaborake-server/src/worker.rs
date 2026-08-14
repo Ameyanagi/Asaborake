@@ -174,7 +174,10 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
         .profile
         .clone()
         .unwrap_or_else(|| job.profile.clone());
-    let Some(profile) = asaborake_core::profile::builtin().remove(&wanted) else {
+    let Some(profile) = asaborake_core::profile::ProfileStore::open(&context.config.profile_dir)
+        .all()
+        .remove(&wanted)
+    else {
         let message = format!("no profile named '{wanted}'");
         fail(context, &job, &message).await;
         return Ok(());

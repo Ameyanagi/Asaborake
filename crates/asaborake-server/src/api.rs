@@ -47,7 +47,11 @@ pub fn router(context: Context) -> Router {
         .route("/api/v1/recordings", get(list_recordings))
         .route("/api/v1/recordings/probe", get(probe_recording))
         .route("/api/v1/frame", get(frame))
-        .route("/api/v1/profiles", get(list_profiles))
+        .route("/api/v1/profiles", get(list_profiles).put(save_profile))
+        .route(
+            "/api/v1/profiles/{name}",
+            get(get_profile).delete(forget_profile),
+        )
         .route("/api/v1/events", get(stream_events))
         .with_state(context)
 }
@@ -139,7 +143,10 @@ async fn submit_job(
             "input and output are both required",
         ));
     }
-    if !asaborake_core::profile::builtin().contains_key(&request.profile) {
+    if !asaborake_core::profile::ProfileStore::open(&context.config.profile_dir)
+        .all()
+        .contains_key(&request.profile)
+    {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             format!("no profile named '{}'", request.profile),
@@ -390,7 +397,7 @@ async fn replace_rules(
     State(context): State<Context>,
     Json(rules): Json<Vec<asaborake_core::Rule>>,
 ) -> ApiResult<Json<Value>> {
-    let profiles = asaborake_core::profile::builtin();
+    let profiles = asaborake_core::profile::ProfileStore::open(&context.config.profile_dir).all();
     for rule in &rules {
         if let Some(profile) = &rule.profile
             && !profiles.contains_key(profile)
@@ -423,7 +430,9 @@ async fn set_channel(
     // A profile that does not exist would fail every job on the channel at
     // the moment it starts, which is a slow way to find out about a typo.
     if let Some(profile) = &settings.profile
-        && !asaborake_core::profile::builtin().contains_key(profile)
+        && !asaborake_core::profile::ProfileStore::open(&context.config.profile_dir)
+            .all()
+            .contains_key(profile)
     {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -687,20 +696,71 @@ async fn scan_logo(
     })))
 }
 
+/// One profile, as the TOML it is.
+///
+/// The document rather than a rendering of it, because a profile *is* a TOML
+/// document — the thing the engine parses and the thing somebody would edit in
+/// a text editor. Two representations would drift.
+async fn get_profile(
+    State(context): State<Context>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let store = asaborake_core::profile::ProfileStore::open(&context.config.profile_dir);
+    let profile = store
+        .all()
+        .remove(&name)
+        .ok_or_else(|| ApiError::not_found("profile"))?;
+    let toml = profile
+        .to_toml()
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(json!({ "name": name, "toml": toml })))
+}
+
+/// What a profile is being changed to.
+#[derive(Debug, Deserialize)]
+struct ProfileBody {
+    toml: String,
+}
+
+async fn save_profile(
+    State(context): State<Context>,
+    Json(body): Json<ProfileBody>,
+) -> ApiResult<Json<Value>> {
+    let store = asaborake_core::profile::ProfileStore::open(&context.config.profile_dir);
+    // Parsed before it is written, so a document that would break the engine
+    // is refused while somebody is still looking at it.
+    let profile = store
+        .save(&body.toml)
+        .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?;
+    Ok(Json(json!({ "name": profile.name })))
+}
+
+async fn forget_profile(
+    State(context): State<Context>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let removed = asaborake_core::profile::ProfileStore::open(&context.config.profile_dir)
+        .remove(&name)
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(json!({ "removed": removed })))
+}
+
 async fn list_profiles(State(context): State<Context>) -> Json<Value> {
-    let profiles: Vec<Value> = asaborake_core::profile::builtin()
-        .into_iter()
-        .map(|(name, profile)| {
-            json!({
-                "name": name,
-                "description": profile.description,
-                "container": profile.container,
-                "encoder": profile.video.encoder,
-                // A profile the build cannot run is shown but not offered.
-                "available": profile.is_supported_by(&context.ffmpeg),
+    let profiles: Vec<Value> =
+        asaborake_core::profile::ProfileStore::open(&context.config.profile_dir)
+            .all()
+            .into_iter()
+            .map(|(name, profile)| {
+                json!({
+                    "name": name,
+                    "description": profile.description,
+                    "container": profile.container,
+                    "encoder": profile.video.encoder,
+                    // A profile the build cannot run is shown but not offered.
+                    "available": profile.is_supported_by(&context.ffmpeg),
+                })
             })
-        })
-        .collect();
+            .collect();
     Json(json!(profiles))
 }
 

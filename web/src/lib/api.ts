@@ -251,6 +251,20 @@ export const api = {
 
   listProfiles: () => request<Profile[]>("/profiles"),
 
+  getProfile: (name: string) =>
+    request<{ name: string; toml: string }>(
+      `/profiles/${encodeURIComponent(name)}`,
+    ),
+  saveProfile: (toml: string) =>
+    request<{ name: string }>("/profiles", {
+      method: "PUT",
+      body: JSON.stringify({ toml }),
+    }),
+  forgetProfile: (name: string) =>
+    request<{ removed: boolean }>(`/profiles/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+
   listChannels: () => request<Record<string, ChannelSettings>>("/channels"),
   setChannel: (id: string, settings: ChannelSettings) =>
     request<{ channel_id: string }>(`/channels/${encodeURIComponent(id)}`, {
