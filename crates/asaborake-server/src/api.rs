@@ -103,6 +103,10 @@ async fn health(State(context): State<Context>) -> Json<Value> {
             "libx265": context.ffmpeg.has_encoder("libx265"),
         },
         "logo_store": context.logos.is_some(),
+        // Shown so a queue that is not moving explains itself rather than
+        // looking broken.
+        "run_hours": context.config.run_hours.describe(),
+        "running_now": context.config.run_hours.allows_now(),
     }))
 }
 

@@ -146,8 +146,11 @@ or so, M a few days, L a week or more.
     commercials — which skips the logo search and the segmentation rather than
     running them to conclude nothing — and can override the encoding profile,
     which is the useful half of item 10 without the rule engine.
-12. **Run-hours schedule and finish action.** Encode only at night; sleep or
-    shut down when the queue empties. **M**
+12. **Run-hours schedule and finish action.** The schedule is ~~done~~: hours
+    of the day during which jobs may *start*, with anything already running
+    left alone, and the health endpoint reporting the schedule so a queue that
+    is not moving explains itself. Sleeping or shutting down when the queue
+    empties is still missing. **M**
 13. **Output naming from metadata**, genre folders, duplicate handling. **M**
 14. **Source housekeeping.** Duplicate submissions and the free-space check
     are ~~done~~: the same recording to the same output returns the job already

@@ -116,7 +116,24 @@ pub fn spawn_pool(context: &Context, count: usize) -> Vec<tokio::task::JoinHandl
 
 /// Take jobs until the process ends.
 async fn run_worker(context: Context) {
+    let mut resting = false;
     loop {
+        // Outside its hours the queue does not stop accepting work, it stops
+        // starting it. Anything already running is left alone: killing an
+        // encode at 07:00 wastes the six hours it has already had.
+        if !context.config.run_hours.allows_now() {
+            if !resting {
+                tracing::info!(
+                    hours = %context.config.run_hours.describe(),
+                    "outside the hours jobs may run; waiting"
+                );
+                resting = true;
+            }
+            tokio::time::sleep(IDLE_POLL).await;
+            continue;
+        }
+        resting = false;
+
         match context.store.claim_next().await {
             Ok(Some(job)) => {
                 let id = job.id.clone();

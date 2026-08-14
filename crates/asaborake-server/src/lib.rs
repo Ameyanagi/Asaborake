@@ -12,6 +12,7 @@
 pub mod api;
 pub mod db;
 pub mod disk;
+pub mod schedule;
 pub mod sources;
 pub mod worker;
 
@@ -49,6 +50,13 @@ pub struct Config {
     /// file nobody notices.
     #[serde(default = "default_low_confidence")]
     pub on_low_confidence: asaborake_cmcut::LowConfidencePolicy,
+    /// Hours of the day during which jobs may run, 0 to 23.
+    ///
+    /// Empty means any time. An encode saturates a GPU for an hour, and the
+    /// machine doing it is usually the one somebody is also watching
+    /// television on.
+    #[serde(default)]
+    pub run_hours: schedule::RunHours,
     /// Where per-channel settings live.
     #[serde(default = "default_channels")]
     pub channels: PathBuf,
@@ -98,6 +106,7 @@ impl Default for Config {
             database: default_database(),
             logo_dir: default_logo_dir(),
             channels: default_channels(),
+            run_hours: schedule::RunHours::default(),
             concurrency: default_concurrency(),
             on_low_confidence: default_low_confidence(),
             recording_dirs: Vec::new(),
