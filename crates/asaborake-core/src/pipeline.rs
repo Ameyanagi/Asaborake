@@ -56,6 +56,12 @@ pub struct JobRequest {
     /// Off by default: a scan can be wrong about an unusual recording, and
     /// producing a poor file is a better failure than producing none.
     pub refuse_damaged: bool,
+    /// Cuts chosen by hand, which replace the segmenter's answer entirely.
+    ///
+    /// A detection that got it wrong is a lost recording only if there is no
+    /// way to correct it. When these are given the analysis still runs — the
+    /// timeline is drawn from it — but nothing it concludes is acted on.
+    pub manual_ranges: Option<Vec<asaborake_cmcut::KeepRange>>,
     /// What the source contains, when the caller has already scanned it.
     ///
     /// A caller that records this before starting — as the server does — keeps
@@ -80,6 +86,7 @@ impl JobRequest {
             cut: CutOptions::default(),
             learn_logo: true,
             refuse_damaged: false,
+            manual_ranges: None,
             diagnostics: None,
         }
     }
@@ -230,7 +237,7 @@ pub fn run(
 
     let logo_learned = request.learn_logo && !no_logo && remember_logo(store, &analysis);
 
-    let plan = asaborake_cmcut::plan(&analysis, &request.cut);
+    let plan = decide(&analysis, request);
     tracing::info!(
         confidence = plan.confidence,
         removed_seconds = plan.removed_seconds(),
@@ -471,6 +478,28 @@ fn clip_segments(
             })
         })
         .collect()
+}
+
+/// What to cut: either what somebody chose, or what the segmenter worked out.
+///
+/// Hand-chosen ranges replace the answer entirely rather than nudging it. The
+/// analysis still runs, because the timeline is drawn from it, but nothing it
+/// concludes is acted on — the person looking at that timeline has already
+/// overruled it.
+fn decide(analysis: &Analysis, request: &JobRequest) -> CutPlan {
+    let Some(keep) = &request.manual_ranges else {
+        return asaborake_cmcut::plan(analysis, &request.cut);
+    };
+    tracing::info!(ranges = keep.len(), "using cuts chosen by hand");
+    CutPlan {
+        // No segments: nobody labelled the gaps, they simply are not kept.
+        segments: Vec::new(),
+        keep: keep.clone(),
+        // Somebody looked at it, which is the most confidence available.
+        confidence: 1.0,
+        decision: Decision::Cut,
+        reason: "cut by hand".to_owned(),
+    }
 }
 
 /// Stop the job when the plan is not trustworthy and the policy says to.

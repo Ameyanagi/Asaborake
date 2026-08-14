@@ -190,13 +190,15 @@ or so, M a few days, L a week or more.
 
 ### Stage 5 — go past Amatsukaze
 
-20. **Make the timeline editable.** Drag boundaries, retype a segment, re-cut
-    without re-analysing — the analysis is already stored. Amatsukaze has no
-    equivalent, and it turns a wrong detection from a lost recording into a
-    thirty-second correction. **M**
-21. **Show the evidence for a decision.** Clicking a boundary should show why
-    it was chosen: the logo score, the silence, the scene change, and how the
-    15-second grid voted. **S**
+20. **Make the timeline editable.** ~~Retyping a segment and re-cutting are
+    done~~: call any stretch the other thing and re-encode, and the result is
+    written beside the original rather than over it. Dragging a boundary to a
+    time the segmenter never proposed is still missing — the correction
+    available is choosing among the boundaries it found.
+21. ~~**Show the evidence for a decision.**~~ **Done.** Selecting a segment
+    shows what argued for its label and what argued against: how much of it
+    the logo covered, how near its length sits to the 15-second grid, and
+    whether each end coincides with a scene change and a silence.
 
 ---
 

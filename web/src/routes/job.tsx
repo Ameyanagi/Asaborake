@@ -7,7 +7,7 @@
  * thing?
  */
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useParams } from "@tanstack/react-router";
 import {
   api,
@@ -19,6 +19,7 @@ import {
   type Job,
   type JobEvent,
   type Segment,
+  type SegmentKind,
 } from "../lib/api";
 import { Timeline } from "../components/Timeline";
 import {
@@ -104,6 +105,116 @@ function Source({ source }: { source: Diagnostics }) {
   );
 }
 
+/**
+ * Why this boundary, and not one a second either side.
+ *
+ * The timeline shows the decision and the evidence side by side, but not the
+ * *link* between them — and when a cut lands somewhere surprising, that link
+ * is the only thing worth looking at. Amatsukaze cannot answer this at all:
+ * its detection is a rule cascade with no record of which rule fired.
+ *
+ * Everything here is computed from the analysis already loaded, so it costs
+ * nothing and cannot disagree with what the timeline drew.
+ */
+function Evidence({
+  segment,
+  analysis,
+}: {
+  segment: Segment;
+  analysis: Analysis;
+}) {
+  /** The strongest cut within half a second of a moment. */
+  const cutNear = (at: number) => {
+    const near = analysis.scene_changes.filter(
+      (change) => Math.abs(change.seconds - at) <= 0.5,
+    );
+    return near.sort((a, b) => b.strength - a.strength)[0];
+  };
+
+  /** A silence covering a moment, if there is one. */
+  const silenceAt = (at: number) =>
+    analysis.silent_spans.find(
+      (span) => span.start - 0.5 <= at && span.end + 0.5 >= at,
+    );
+
+  /** How much of this stretch the logo was up for. */
+  const logoShare = (() => {
+    const covered = analysis.logo_intervals.reduce((total, interval) => {
+      const start = Math.max(interval.start, segment.start);
+      const end = Math.min(interval.end, segment.end);
+      return total + Math.max(0, end - start);
+    }, 0);
+    const length = segment.end - segment.start;
+    return length > 0 ? covered / length : 0;
+  })();
+
+  const length = segment.end - segment.start;
+  // Japanese commercial blocks are laid out on a fifteen-second grid, and how
+  // near a block sits to it is one of the strongest signals there is.
+  const offGrid = Math.abs(length - Math.round(length / 15) * 15);
+
+  const rows: [string, string, boolean][] = [
+    [
+      "logo",
+      segment.kind === "commercial"
+        ? `absent for ${((1 - logoShare) * 100).toFixed(0)}% of this stretch`
+        : `present for ${(logoShare * 100).toFixed(0)}% of this stretch`,
+      segment.kind === "commercial" ? logoShare < 0.2 : logoShare > 0.8,
+    ],
+    [
+      "length",
+      `${formatDuration(length)}, ${
+        offGrid < 0.35
+          ? `on the 15-second grid (${Math.round(length / 15)} × 15s)`
+          : `${offGrid.toFixed(1)}s off the 15-second grid`
+      }`,
+      offGrid < 0.35,
+    ],
+    [
+      "starts at",
+      [
+        cutNear(segment.start)
+          ? `a scene change (strength ${cutNear(segment.start)?.strength.toFixed(2)})`
+          : "no scene change nearby",
+        silenceAt(segment.start) ? "silence" : "no silence",
+      ].join(", "),
+      Boolean(cutNear(segment.start)) && Boolean(silenceAt(segment.start)),
+    ],
+    [
+      "ends at",
+      [
+        cutNear(segment.end)
+          ? `a scene change (strength ${cutNear(segment.end)?.strength.toFixed(2)})`
+          : "no scene change nearby",
+        silenceAt(segment.end) ? "silence" : "no silence",
+      ].join(", "),
+      Boolean(cutNear(segment.end)) && Boolean(silenceAt(segment.end)),
+    ],
+  ];
+
+  return (
+    <div className="mt-6 border-l-2 border-rule-bright bg-panel px-4 py-3">
+      <div className="eyebrow">
+        why this is {segment.kind === "commercial" ? "a commercial" : "programme"}
+      </div>
+      <dl className="mt-2 grid gap-x-8 gap-y-1.5 sm:grid-cols-[6rem_1fr]">
+        {rows.map(([label, detail, agrees]) => (
+          <Fragment key={label}>
+            <dt className="text-ink-faint">{label}</dt>
+            {/* Coloured by whether the evidence supports the label, because
+                the useful reading is "which of these disagrees". */}
+            <dd className={agrees ? "text-ink" : "text-ink-dim"}>{detail}</dd>
+          </Fragment>
+        ))}
+      </dl>
+      <p className="mt-2 font-sans text-ink-faint">
+        Confidence {segment.confidence.toFixed(2)}. Highlighted evidence is
+        what supports the label; the rest is what argued against it.
+      </p>
+    </div>
+  );
+}
+
 export function JobDetail() {
   const { jobId } = useParams({ from: "/jobs/$jobId" });
 
@@ -113,6 +224,10 @@ export function JobDetail() {
   const [source, setSource] = useState<Diagnostics | null>(null);
   const [events, setEvents] = useState<JobEvent[]>([]);
   const [selected, setSelected] = useState<Segment | undefined>();
+  // Segments somebody has retyped. Held here rather than written back, so the
+  // original decision is still on screen to compare against until they commit.
+  const [flipped, setFlipped] = useState<Record<string, SegmentKind>>({});
+  const [recutting, setRecutting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -182,6 +297,24 @@ export function JobDetail() {
       .filter((segment) => segment.kind === "commercial")
       .reduce((total, segment) => total + (segment.end - segment.start), 0) ?? 0;
   const wasCut = plan?.decision === "cut";
+
+  /** A segment's identity, which is where it starts. */
+  const key = (segment: Segment) => `${segment.start}`;
+
+  /** Call a segment the other thing, or put it back. */
+  const flip = (segment: Segment) => {
+    setFlipped((current) => {
+      const next = { ...current };
+      const now = next[key(segment)] ?? segment.kind;
+      const other: SegmentKind = now === "programme" ? "commercial" : "programme";
+      if (other === segment.kind) {
+        delete next[key(segment)];
+      } else {
+        next[key(segment)] = other;
+      }
+      return next;
+    });
+  };
 
   return (
     <Page
@@ -270,6 +403,48 @@ export function JobDetail() {
             onSelect={setSelected}
           />
 
+          {selected && <Evidence segment={selected} analysis={analysis} />}
+
+          {Object.keys(flipped).length > 0 && (
+            <div className="mt-6 flex flex-wrap items-center gap-4 border-l-2 border-programme bg-panel px-4 py-3">
+              <span className="font-sans text-ink">
+                {Object.keys(flipped).length} segment
+                {Object.keys(flipped).length === 1 ? "" : "s"} retyped.
+              </span>
+              <Action
+                disabled={recutting}
+                onClick={() => {
+                  setRecutting(true);
+                  // Adjacent kept stretches are merged, because two ranges
+                  // meeting at a point would cut and rejoin at that frame for
+                  // no reason.
+                  const keep: { start: number; end: number }[] = [];
+                  for (const segment of plan.segments) {
+                    const kind = flipped[key(segment)] ?? segment.kind;
+                    if (kind !== "programme") continue;
+                    const last = keep[keep.length - 1];
+                    if (last && Math.abs(last.end - segment.start) < 0.001) {
+                      last.end = segment.end;
+                    } else {
+                      keep.push({ start: segment.start, end: segment.end });
+                    }
+                  }
+                  void api
+                    .recutJob(job.id, keep)
+                    .then(() => setFlipped({}))
+                    .catch((cause: Error) => setError(cause.message))
+                    .finally(() => setRecutting(false));
+                }}
+              >
+                {recutting ? "Queueing…" : "Re-encode with these cuts"}
+              </Action>
+              <Action onClick={() => setFlipped({})}>Undo</Action>
+              <span className="font-sans text-ink-dim">
+                Written beside the original, not over it.
+              </span>
+            </div>
+          )}
+
           <div className="mt-8 border-t border-rule">
             {plan.segments.map((segment) => {
               const isSelected =
@@ -288,14 +463,19 @@ export function JobDetail() {
                     className="inline-block h-2 w-4 shrink-0"
                     style={{
                       background:
-                        segment.kind === "programme"
+                        (flipped[key(segment)] ?? segment.kind) === "programme"
                           ? "var(--color-programme)"
                           : "var(--color-commercial)",
                     }}
                     aria-hidden="true"
                   />
                   <span className="w-24 shrink-0 text-ink">
-                    {segment.kind === "programme" ? "Programme" : "CM"}
+                    {(flipped[key(segment)] ?? segment.kind) === "programme"
+                      ? "Programme"
+                      : "CM"}
+                    {flipped[key(segment)] && (
+                      <span className="ml-1 text-programme">·</span>
+                    )}
                   </span>
                   <span className="w-40 shrink-0 text-ink-dim">
                     {formatDuration(segment.start)} –{" "}
@@ -304,8 +484,31 @@ export function JobDetail() {
                   <span className="w-20 shrink-0 text-ink-dim">
                     {formatDuration(segment.end - segment.start)}
                   </span>
-                  <span className="text-ink-faint">
+                  <span className="flex-1 text-ink-faint">
                     confidence {segment.confidence.toFixed(2)}
+                  </span>
+                  {/* Retyping a segment is the correction that turns a wrong
+                      detection from a lost recording into a moment's work. */}
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    title="Call this the other thing"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      flip(segment);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.stopPropagation();
+                        flip(segment);
+                      }
+                    }}
+                    className="shrink-0 border border-rule-bright px-2 py-0.5 text-ink-dim transition-colors hover:border-programme hover:text-programme"
+                  >
+                    call it{" "}
+                    {(flipped[key(segment)] ?? segment.kind) === "programme"
+                      ? "CM"
+                      : "programme"}
                   </span>
                 </button>
               );

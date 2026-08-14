@@ -28,6 +28,7 @@ pub fn router(context: Context) -> Router {
         .route("/api/v1/jobs/{id}/retry", post(retry_job))
         .route("/api/v1/jobs/{id}/events", get(job_events))
         .route("/api/v1/jobs/{id}/analysis", get(job_analysis))
+        .route("/api/v1/jobs/{id}/recut", post(recut_job))
         .route("/api/v1/logos", get(list_logos))
         .route("/api/v1/logos/scan", post(scan_logo))
         .route(
@@ -251,6 +252,101 @@ async fn job_analysis(
         plan: parse(artifacts.plan),
         diagnostics: parse(artifacts.diagnostics),
     }))
+}
+
+/// Where to cut, said by hand.
+#[derive(Debug, Deserialize)]
+struct RecutRequest {
+    /// Stretches of the source to keep, in seconds.
+    keep: Vec<KeepSpan>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KeepSpan {
+    start: f64,
+    end: f64,
+}
+
+/// Re-encode a recording with cuts somebody chose.
+///
+/// The point of the timeline: a detection that got it wrong is a lost
+/// recording only if there is no way to correct it. Amatsukaze has no
+/// equivalent — its only override is dropping a file next to the source, with
+/// nothing to produce one.
+///
+/// A new job rather than an edit of the old one, so what was originally
+/// decided is still there to compare against.
+async fn recut_job(
+    State(context): State<Context>,
+    Path(id): Path<String>,
+    Json(request): Json<RecutRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let job = context
+        .store
+        .get(&id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("job"))?;
+
+    if request.keep.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "nothing was kept, so there would be nothing to encode",
+        ));
+    }
+    if request
+        .keep
+        .iter()
+        .any(|span| !span.start.is_finite() || !span.end.is_finite() || span.end <= span.start)
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "every kept stretch must end after it starts",
+        ));
+    }
+
+    let ranges: Vec<asaborake_cmcut::KeepRange> = request
+        .keep
+        .iter()
+        .map(|span| asaborake_cmcut::KeepRange {
+            start: span.start,
+            end: span.end,
+        })
+        .collect();
+
+    // Written beside the original rather than over it: the first result may
+    // well be the one somebody wants to keep after seeing the second.
+    let output = std::path::Path::new(&job.output);
+    let stem = output
+        .file_stem()
+        .map_or_else(|| "recut".to_owned(), |s| s.to_string_lossy().into_owned());
+    let extension = output
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let recut = output
+        .with_file_name(format!("{stem}.recut{extension}"))
+        .to_string_lossy()
+        .into_owned();
+
+    let new_id = context
+        .store
+        .submit_with_ranges(
+            &NewJob {
+                input: job.input,
+                output: recut,
+                profile: job.profile,
+                title: job.title,
+                channel_id: job.channel_id,
+                channel_name: job.channel_name,
+                // Somebody is sitting there waiting for it.
+                priority: job.priority + 10,
+            },
+            &ranges,
+        )
+        .await?;
+    context.wake.notify_one();
+
+    Ok((StatusCode::CREATED, Json(json!({ "id": new_id }))))
 }
 
 /// A logo, as the UI lists it.

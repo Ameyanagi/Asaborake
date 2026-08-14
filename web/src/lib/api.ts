@@ -230,6 +230,12 @@ export const api = {
 
   cancelJob: (id: string) =>
     request<{ cancelled: boolean }>(`/jobs/${id}/cancel`, { method: "POST" }),
+  /** Re-encode with cuts chosen by hand. Makes a new job. */
+  recutJob: (id: string, keep: { start: number; end: number }[]) =>
+    request<{ id: string }>(`/jobs/${id}/recut`, {
+      method: "POST",
+      body: JSON.stringify({ keep }),
+    }),
   retryJob: (id: string) =>
     request<{ id: string }>(`/jobs/${id}/retry`, { method: "POST" }),
 

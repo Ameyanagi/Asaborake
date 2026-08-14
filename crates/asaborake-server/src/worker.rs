@@ -221,6 +221,7 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
         .await;
     }
     request.diagnostics = inspect_source(context, &job).await;
+    request.manual_ranges = context.store.manual_ranges(&job.id).await.ok().flatten();
 
     // Progress arrives from a blocking thread and has to cross back to the
     // async side to be recorded and published.

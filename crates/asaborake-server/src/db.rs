@@ -317,6 +317,45 @@ impl Store {
         Ok(())
     }
 
+    /// Queue a job whose cuts were chosen by hand.
+    ///
+    /// # Errors
+    /// Returns [`Error::Database`] if the insert fails.
+    pub async fn submit_with_ranges(
+        &self,
+        request: &NewJob,
+        ranges: &[asaborake_cmcut::KeepRange],
+    ) -> Result<String, Error> {
+        let id = self.submit(request).await?;
+        let json = serde_json::to_string(ranges).unwrap_or_else(|_| "[]".to_owned());
+        sqlx::query("UPDATE jobs SET manual_ranges = ? WHERE id = ?")
+            .bind(json)
+            .bind(&id)
+            .execute(&self.pool)
+            .await
+            .map_err(Error::Database)?;
+        Ok(id)
+    }
+
+    /// The hand-chosen cuts for a job, if it has any.
+    ///
+    /// # Errors
+    /// Returns [`Error::Database`] if the query fails.
+    pub async fn manual_ranges(
+        &self,
+        id: &str,
+    ) -> Result<Option<Vec<asaborake_cmcut::KeepRange>>, Error> {
+        let row = sqlx::query("SELECT manual_ranges FROM jobs WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Error::Database)?;
+        Ok(row
+            .and_then(|row| row.try_get::<Option<String>, _>("manual_ranges").ok())
+            .flatten()
+            .and_then(|text| serde_json::from_str(&text).ok()))
+    }
+
     /// Record how big the result was.
     ///
     /// # Errors
