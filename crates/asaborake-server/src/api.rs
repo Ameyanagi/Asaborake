@@ -38,6 +38,11 @@ pub fn router(context: Context) -> Router {
             "/api/v1/logos/no-logo/{channel}",
             post(mark_no_logo).delete(clear_no_logo),
         )
+        .route("/api/v1/channels", get(list_channels))
+        .route(
+            "/api/v1/channels/{id}",
+            axum::routing::put(set_channel).delete(forget_channel),
+        )
         .route("/api/v1/recordings", get(list_recordings))
         .route("/api/v1/recordings/probe", get(probe_recording))
         .route("/api/v1/frame", get(frame))
@@ -368,6 +373,45 @@ async fn clear_no_logo(
         .clear_no_logo(&channel)
         .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(Json(json!({ "channel_id": channel, "cleared": cleared })))
+}
+
+/// Per-channel settings, keyed by channel id.
+async fn list_channels(State(context): State<Context>) -> Json<Value> {
+    Json(json!(
+        asaborake_core::ChannelStore::open(&context.config.channels).all()
+    ))
+}
+
+async fn set_channel(
+    State(context): State<Context>,
+    Path(id): Path<String>,
+    Json(settings): Json<asaborake_core::ChannelSettings>,
+) -> ApiResult<Json<Value>> {
+    // A profile that does not exist would fail every job on the channel at
+    // the moment it starts, which is a slow way to find out about a typo.
+    if let Some(profile) = &settings.profile
+        && !asaborake_core::profile::builtin().contains_key(profile)
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!("no profile named '{profile}'"),
+        ));
+    }
+
+    asaborake_core::ChannelStore::open(&context.config.channels)
+        .set(&id, &settings)
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(json!({ "channel_id": id })))
+}
+
+async fn forget_channel(
+    State(context): State<Context>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let removed = asaborake_core::ChannelStore::open(&context.config.channels)
+        .remove(&id)
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(json!({ "removed": removed })))
 }
 
 async fn list_recordings(State(context): State<Context>) -> Json<Vec<crate::sources::Recording>> {

@@ -503,7 +503,7 @@ fn encode(
         // found, when in fact something was found and deliberately not cut.
         println!(
             "kept whole, {:.1}s marked as commercial in the chapters, confidence {:.2}",
-            outcome.plan.cut_seconds(),
+            outcome.plan.cut_seconds().max(0.0),
             outcome.plan.confidence
         );
     }

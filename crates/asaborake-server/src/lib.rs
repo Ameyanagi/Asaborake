@@ -49,6 +49,9 @@ pub struct Config {
     /// file nobody notices.
     #[serde(default = "default_low_confidence")]
     pub on_low_confidence: asaborake_cmcut::LowConfidencePolicy,
+    /// Where per-channel settings live.
+    #[serde(default = "default_channels")]
+    pub channels: PathBuf,
     /// Directories the logo tool may read recordings from.
     ///
     /// The engine serves frames out of these so a browser can show what a
@@ -76,6 +79,9 @@ fn default_listen() -> String {
 fn default_database() -> PathBuf {
     PathBuf::from("/var/lib/asaborake/jobs.db")
 }
+fn default_channels() -> PathBuf {
+    PathBuf::from("/var/lib/asaborake/channels.json")
+}
 fn default_logo_dir() -> PathBuf {
     PathBuf::from("/var/lib/asaborake/logos")
 }
@@ -91,6 +97,7 @@ impl Default for Config {
             listen: default_listen(),
             database: default_database(),
             logo_dir: default_logo_dir(),
+            channels: default_channels(),
             concurrency: default_concurrency(),
             on_low_confidence: default_low_confidence(),
             recording_dirs: Vec::new(),

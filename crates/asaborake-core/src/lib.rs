@@ -10,6 +10,7 @@
 // constructs in shipping code, not in the suite that checks it.
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic))]
 
+pub mod channels;
 pub mod chapters;
 pub mod diagnostics;
 pub mod encode;
@@ -20,6 +21,7 @@ pub mod store;
 
 use std::path::PathBuf;
 
+pub use channels::{ChannelSettings, ChannelStore};
 pub use diagnostics::Diagnostics;
 pub use encode::{EncodeRequest, encode};
 pub use parts::{Part, split};

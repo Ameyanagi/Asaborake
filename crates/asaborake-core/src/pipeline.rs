@@ -208,7 +208,10 @@ pub fn run(
         channel_id: request.channel_id.clone(),
         logo_rect: request.logo_rect,
         deinterlace: video.interlaced,
-        find_logo: !no_logo,
+        // A channel that carries no commercials has nothing for a logo to
+        // separate, so searching for one is a decoding pass spent on a
+        // question nobody asked.
+        find_logo: !no_logo && request.cut.detect,
         ..AnalysisOptions::default()
     };
 

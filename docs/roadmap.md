@@ -142,8 +142,10 @@ or so, M a few days, L a week or more.
 10. **Profile auto-selection.** Rules over channel, genre, filename and video
     size choosing profile and priority. Needs ARIB genre parsing, which
     `asaborake-ts` does not do yet. **M**
-11. **Per-channel settings**, including disabling CM detection for channels
-    that carry no ads. **S**
+11. ~~**Per-channel settings.**~~ **Done.** A channel can be told it carries no
+    commercials — which skips the logo search and the segmentation rather than
+    running them to conclude nothing — and can override the encoding profile,
+    which is the useful half of item 10 without the rule engine.
 12. **Run-hours schedule and finish action.** Encode only at night; sleep or
     shut down when the queue empties. **M**
 13. **Output naming from metadata**, genre folders, duplicate handling. **M**

@@ -148,11 +148,33 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
     });
     log(context, &job.id, "info", "starting").await;
 
-    let Some(profile) = asaborake_core::profile::builtin().remove(&job.profile) else {
-        let message = format!("no profile named '{}'", job.profile);
+    // A channel may override what the job asked for. NHK carries no
+    // advertising, so looking for commercials in it spends a pass to find
+    // nothing; a film channel may want a better profile than the default.
+    let settings = asaborake_core::ChannelStore::open(&context.config.channels)
+        .get(job.channel_id.as_deref().unwrap_or_default());
+
+    let wanted = settings
+        .profile
+        .clone()
+        .unwrap_or_else(|| job.profile.clone());
+    let Some(profile) = asaborake_core::profile::builtin().remove(&wanted) else {
+        let message = format!("no profile named '{wanted}'");
         fail(context, &job, &message).await;
         return Ok(());
     };
+    if wanted != job.profile {
+        log(
+            context,
+            &job.id,
+            "info",
+            &format!(
+                "using '{wanted}' for this channel instead of '{}'",
+                job.profile
+            ),
+        )
+        .await;
+    }
 
     if let Some(message) = no_room_for(&job) {
         fail(context, &job, &message).await;
@@ -164,6 +186,19 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
     request.channel_name.clone_from(&job.channel_name);
     request.title.clone_from(&job.title);
     request.cut.low_confidence = context.config.on_low_confidence;
+    if !settings.detect_commercials {
+        // Nothing to find, so nothing is looked for: no logo pass, no
+        // segmentation, and the recording is transcoded whole.
+        request.learn_logo = false;
+        request.cut.detect = false;
+        log(
+            context,
+            &job.id,
+            "info",
+            "this channel carries no commercials, so none are looked for",
+        )
+        .await;
+    }
     request.diagnostics = inspect_source(context, &job).await;
 
     // Progress arrives from a blocking thread and has to cross back to the
@@ -259,7 +294,7 @@ async fn record(
                     format!(
                         "done: kept whole, {:.1}s marked as commercial in the chapters, \
                          confidence {:.2}",
-                        result.plan.cut_seconds(),
+                        result.plan.cut_seconds().max(0.0),
                         result.plan.confidence
                     )
                 },

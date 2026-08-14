@@ -262,6 +262,13 @@ pub struct CutOptions {
     pub weights: Weights,
     /// Candidate construction tunables.
     pub boundaries: BoundaryOptions,
+    /// Whether to look for commercials at all.
+    ///
+    /// Off for a channel that carries none. Searching material with nothing in
+    /// it cannot find anything, but it can find something — and cutting a
+    /// programme that had no advertisements in it is the worst outcome the
+    /// whole system has.
+    pub detect: bool,
 }
 
 impl Default for CutOptions {
@@ -278,6 +285,7 @@ impl Default for CutOptions {
             low_confidence: LowConfidencePolicy::Keep,
             weights: Weights::default(),
             boundaries: BoundaryOptions::default(),
+            detect: true,
         }
     }
 }
@@ -285,6 +293,10 @@ impl Default for CutOptions {
 /// Segment a recording into programme and commercial stretches.
 #[must_use]
 pub fn plan(analysis: &Analysis, options: &CutOptions) -> CutPlan {
+    if !options.detect {
+        return keep_everything(analysis, "this channel carries no commercials");
+    }
+
     let boundaries = boundary::candidates(analysis, &options.boundaries);
     let logo_available = analysis.has_logo();
 
@@ -849,6 +861,34 @@ mod tests {
             "{}",
             plan.kept_seconds()
         );
+    }
+
+    #[test]
+    fn a_channel_that_carries_no_commercials_is_never_cut() {
+        // Material with obvious breaks in it, from a channel configured as
+        // carrying none. Searching cannot find what is not there, but it can
+        // find something — and cutting a programme that had no advertisements
+        // is the worst outcome this system has.
+        let analysis = broadcast(1800.0, &[(420.0, 510.0), (960.0, 1050.0)], true);
+        let options = CutOptions {
+            detect: false,
+            ..CutOptions::default()
+        };
+        let plan = plan(&analysis, &options);
+
+        assert_eq!(plan.decision, Decision::KeepAll);
+        assert!(plan.removed_seconds().abs() < 1e-9);
+        assert_eq!(plan.keep.len(), 1);
+        assert!(
+            plan.reason.contains("no commercials"),
+            "reason: {}",
+            plan.reason
+        );
+
+        // The same material with detection on does find them, so the test is
+        // measuring the switch rather than material nothing could cut.
+        let found = super::plan(&analysis, &CutOptions::default());
+        assert!(found.cut_seconds() > 0.0);
     }
 
     #[test]
