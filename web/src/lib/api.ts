@@ -309,6 +309,8 @@ export const api = {
   scanLogo: (body: {
     path: string;
     rect: Rect;
+    /** Where the operator was looking, which is where the scan starts. */
+    at?: number;
     channel_id?: string;
     name?: string;
   }) => request<ScanResult>("/logos/scan", {

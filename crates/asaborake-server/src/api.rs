@@ -701,6 +701,13 @@ struct ScanRequest {
     /// Human-readable name.
     #[serde(default)]
     name: Option<String>,
+    /// Where in the recording the operator was looking when they drew the box.
+    ///
+    /// The scan starts here, because a moment somebody chose is a moment the
+    /// logo is visible — and a flat corner found anywhere else is most likely
+    /// a commercial, which is when the logo is off.
+    #[serde(default)]
+    at: Option<f64>,
     /// How much the box's border may vary and still count as flat.
     ///
     /// Raising it accepts more frames from a noisy corner, at the cost of
@@ -753,6 +760,7 @@ async fn scan_logo(
             .or_else(|| request.channel_id.clone())
             .unwrap_or_else(|| "unnamed".to_owned()),
         channel_id: request.channel_id.clone(),
+        start_seconds: request.at,
         ..asaborake_analyze::AnalysisOptions::default()
     };
 

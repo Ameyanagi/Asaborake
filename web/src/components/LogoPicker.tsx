@@ -152,6 +152,9 @@ export function LogoPicker({ onLearned }: { onLearned: () => void }) {
       .scanLogo({
         path,
         rect,
+        // The frame on screen is one where the logo is visible, which is
+        // exactly what the fit needs and what a whole-recording scan misses.
+        at,
         ...(channelId ? { channel_id: channelId } : {}),
         ...(name ? { name } : {}),
       })

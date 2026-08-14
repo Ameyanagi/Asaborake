@@ -141,6 +141,19 @@ pub struct AnalysisOptions {
     /// finding it again: automatic location has to infer from the picture what
     /// a person can simply see. Supplying it skips the location pass entirely.
     pub logo_rect: Option<Rect>,
+    /// Where in the recording to start learning from.
+    ///
+    /// This matters more than it sounds. The fit only accepts frames whose
+    /// corner is flat, and on Japanese broadcast a flat corner is most likely
+    /// during a commercial or a fade — which is exactly when the station logo
+    /// is switched *off*. Scanning a whole recording therefore fills the fit
+    /// with frames that have no logo in them, and it duly concludes there is
+    /// none.
+    ///
+    /// Amatsukaze avoids this by scanning the section its operator selected.
+    /// So does this: the moment somebody is looking at when they draw the box
+    /// is, by construction, a moment where they can see the logo.
+    pub start_seconds: Option<f64>,
     /// Whether to look for a logo at all.
     ///
     /// Off for a channel known to carry none, which skips three decoding
@@ -171,6 +184,7 @@ impl Default for AnalysisOptions {
         Self {
             logo: None,
             logo_rect: None,
+            start_seconds: None,
             find_logo: true,
             logo_name: "unknown".to_owned(),
             channel_id: None,
@@ -766,6 +780,7 @@ fn open_reader_cropped(
         input,
         probe,
         &FrameReaderOptions {
+            start_seconds: options.start_seconds,
             deinterlace: options.deinterlace,
             // Keyframes are enough to learn from and are a fraction of the
             // work; consecutive frames only matter when a step is asked for.

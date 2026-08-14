@@ -535,6 +535,61 @@ mod tests {
         assert_relative_eq!(logo.colour_at(index), colour, epsilon = 0.05);
     }
 
+    /// As `synthetic_frame`, but the background *behind* the logo is not
+    /// quite the background the border shows.
+    ///
+    /// This is what real material does: a corner is vignetted, or shaded, or
+    /// the logo sits on a panel a shade different from beside it. The fit
+    /// infers the background from the border ring and applies it to the
+    /// interior, so any systematic difference between the two goes straight
+    /// into the regression.
+    fn shaded_frame(background: u8, alpha: f32, colour: f32, shade: i32) -> Vec<u8> {
+        let mut luma = vec![background; (FRAME_W * FRAME_H) as usize];
+        let r = rect();
+        let behind = (i32::from(background) + shade).clamp(0, 255) as u8;
+        for row in 1..r.height - 1 {
+            for column in 1..r.width - 1 {
+                let index = ((r.y + row) * FRAME_W + r.x + column) as usize;
+                let composited = (1.0 - alpha) * f32::from(behind) / 255.0 + alpha * colour;
+                luma[index] = (composited * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        luma
+    }
+
+    #[test]
+    fn a_background_that_differs_from_the_border_still_fits() {
+        // The border says one thing and the picture behind the logo is a shade
+        // darker. If this breaks the fit, it explains why a box aimed
+        // correctly at a real logo comes back with nothing.
+        let (alpha, colour) = (0.45f32, 0.85f32);
+        let mut scanner = LogoScanner::strict(rect(), DEFAULT_FLATNESS_THRESHOLD);
+        for round in 0..60 {
+            for background in [10u8, 60, 120, 200] {
+                let shifted = background.saturating_add((round % 3) as u8);
+                let luma = shaded_frame(shifted, alpha, colour, -20);
+                scanner.add_frame(&frame(&luma));
+            }
+        }
+
+        let logo = scanner
+            .finish_bootstrap("shaded".into(), None, (FRAME_W, FRAME_H))
+            .expect("a fit");
+        let r = rect();
+        let index = ((r.height / 2) * r.width + r.width / 2) as usize;
+        eprintln!(
+            "shaded: alpha={} strong={} frames={}",
+            logo.alpha_at(index),
+            logo.strong_pixels(),
+            logo.frames_used
+        );
+        assert!(
+            logo.alpha_at(index) > 0.2,
+            "a shaded background destroyed the fit: {}",
+            logo.alpha_at(index)
+        );
+    }
+
     #[test]
     fn recovers_an_opaque_logo_as_opaque_rather_than_as_nothing() {
         // The case that was wrong on real broadcast. A pixel the logo covers
