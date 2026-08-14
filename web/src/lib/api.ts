@@ -251,6 +251,25 @@ export const api = {
 
   listProfiles: () => request<Profile[]>("/profiles"),
 
+  listChannels: () => request<Record<string, ChannelSettings>>("/channels"),
+  setChannel: (id: string, settings: ChannelSettings) =>
+    request<{ channel_id: string }>(`/channels/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(settings),
+    }),
+  forgetChannel: (id: string) =>
+    request<{ removed: boolean }>(`/channels/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
+  listRules: () => request<Rule[]>("/rules"),
+  /** All of them at once, because their order is part of their meaning. */
+  replaceRules: (rules: Rule[]) =>
+    request<{ rules: number }>("/rules", {
+      method: "PUT",
+      body: JSON.stringify(rules),
+    }),
+
   listRecordings: () => request<Recording[]>("/recordings"),
 
   probeRecording: (path: string) =>
@@ -275,6 +294,25 @@ export const api = {
     body: JSON.stringify(body),
   }),
 };
+
+/** How one channel should be treated. */
+export interface ChannelSettings {
+  name: string | null;
+  detect_commercials: boolean;
+  profile: string | null;
+}
+
+/** One auto-selection rule: what to match, and what to do about it. */
+export interface Rule {
+  name: string | null;
+  channel_id: string | null;
+  title_contains: string | null;
+  path_contains: string | null;
+  min_height: number | null;
+  profile: string | null;
+  priority: number | null;
+  detect_commercials: boolean | null;
+}
 
 /** A recording the logo tool may read. */
 export interface Recording {

@@ -23,6 +23,7 @@ import { Dashboard } from "./routes/dashboard";
 import { JobDetail } from "./routes/job";
 import { Logos } from "./routes/logos";
 import { Profiles } from "./routes/profiles";
+import { Settings } from "./routes/settings";
 
 const rootRoute = createRootRoute({ component: Shell });
 
@@ -41,6 +42,7 @@ function Shell() {
           <RailLink to="/" label="Queue" />
           <RailLink to="/logos" label="Logos" />
           <RailLink to="/profiles" label="Profiles" />
+          <RailLink to="/settings" label="Settings" />
         </div>
 
         <div className="mt-auto border-t border-rule px-4 py-4 text-[10px] leading-relaxed text-ink-faint">
@@ -96,6 +98,11 @@ const routeTree = rootRoute.addChildren([
     getParentRoute: () => rootRoute,
     path: "/profiles",
     component: Profiles,
+  }),
+  createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/settings",
+    component: Settings,
   }),
 ]);
 

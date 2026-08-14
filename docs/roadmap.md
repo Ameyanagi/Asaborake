@@ -164,13 +164,16 @@ or so, M a few days, L a week or more.
 
 ### Stage 4 — make the UI a console
 
-15. **Submit a job from the browser.** The API and the client method already
-    exist; no screen calls them. **S**
+15. ~~**Submit a job from the browser.**~~ **Done**: pick a recording, a
+    profile and a channel from the queue screen.
 16. **Queue operations** — reorder, priority, duplicate, force-start,
     delete-with-source, filter and search. **M**
 17. **Profile editor.** Currently read-only. **M**
 18. **History browser** with the per-job statistics from stage 1. **M**
-19. **Auto-select rule builder** for stage 3's rules. **M**
+19. ~~**Auto-select rule builder.**~~ **Done**, together with the per-channel
+    settings panel from stage 3. Both live on one screen, deliberately: a
+    channel is the general case and a rule the particular one, and seeing them
+    apart would not answer "why did this recording get that profile".
 
 ### Stage 5 — go past Amatsukaze
 
