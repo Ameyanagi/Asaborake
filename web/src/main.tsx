@@ -20,6 +20,7 @@ import {
 
 import "./styles.css";
 import { Dashboard } from "./routes/dashboard";
+import { History } from "./routes/history";
 import { JobDetail } from "./routes/job";
 import { Logos } from "./routes/logos";
 import { Profiles } from "./routes/profiles";
@@ -40,6 +41,7 @@ function Shell() {
 
         <div className="flex flex-col py-2">
           <RailLink to="/" label="Queue" />
+          <RailLink to="/history" label="History" />
           <RailLink to="/logos" label="Logos" />
           <RailLink to="/profiles" label="Profiles" />
           <RailLink to="/settings" label="Settings" />
@@ -88,6 +90,11 @@ const routeTree = rootRoute.addChildren([
     getParentRoute: () => rootRoute,
     path: "/jobs/$jobId",
     component: JobDetail,
+  }),
+  createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/history",
+    component: History,
   }),
   createRoute({
     getParentRoute: () => rootRoute,

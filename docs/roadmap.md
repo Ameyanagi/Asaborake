@@ -173,7 +173,12 @@ or so, M a few days, L a week or more.
     reverting an override restores what it was overriding. Edited as the TOML
     itself, because a profile *is* a TOML document and a form over it would be
     a second representation to drift from the first.
-18. **History browser** with the per-job statistics from stage 1. **M**
+18. ~~**History browser.**~~ **Done**: everything that has finished, ordered by
+    when, how long it took, how big it came out or by title, with the totals
+    that say whether the machine is keeping up. Output size is recorded on
+    completion, summed over every file a split recording produced. CSV export
+    and the audio-drift statistics are still missing — the latter because
+    nothing measures drift yet.
 19. ~~**Auto-select rule builder.**~~ **Done**, together with the per-channel
     settings panel from stage 3. Both live on one screen, deliberately: a
     channel is the general case and a rule the particular one, and seeing them

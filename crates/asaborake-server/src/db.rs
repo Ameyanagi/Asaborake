@@ -108,6 +108,12 @@ pub struct Job {
     pub started_at: Option<DateTime<Utc>>,
     /// When it stopped.
     pub finished_at: Option<DateTime<Utc>>,
+    /// Total size of what was written, in bytes.
+    ///
+    /// More than one file when a size-changing recording was split. `None`
+    /// when nothing was written, or when the job predates this being kept.
+    #[serde(default)]
+    pub output_bytes: Option<i64>,
 }
 
 /// A request to queue a job.
@@ -304,6 +310,20 @@ impl Store {
         sqlx::query("UPDATE jobs SET progress = ?, message = ? WHERE id = ?")
             .bind(progress.clamp(0.0, 1.0))
             .bind(message)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(Error::Database)?;
+        Ok(())
+    }
+
+    /// Record how big the result was.
+    ///
+    /// # Errors
+    /// Returns [`Error::Database`] if the update fails.
+    pub async fn set_output_bytes(&self, id: &str, bytes: i64) -> Result<(), Error> {
+        sqlx::query("UPDATE jobs SET output_bytes = ? WHERE id = ?")
+            .bind(bytes)
             .bind(id)
             .execute(&self.pool)
             .await
@@ -536,6 +556,7 @@ fn row_to_job(row: &sqlx::sqlite::SqliteRow) -> Job {
         created_at: parse_time(row.try_get("created_at").ok()).unwrap_or_else(Utc::now),
         started_at: parse_time(row.try_get("started_at").ok()),
         finished_at: parse_time(row.try_get("finished_at").ok()),
+        output_bytes: row.try_get("output_bytes").ok(),
     }
 }
 

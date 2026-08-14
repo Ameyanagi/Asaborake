@@ -34,6 +34,8 @@ export interface Job {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  /** Total size of what was written, summed over every file. */
+  output_bytes: number | null;
 }
 
 /** A line a job logged. */

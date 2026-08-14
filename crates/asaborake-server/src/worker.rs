@@ -288,6 +288,18 @@ async fn record(
         Ok(Ok(result)) => {
             let analysis = serde_json::to_string(&result.analysis).ok();
             let plan = serde_json::to_string(&result.plan).ok();
+            // What the job achieved, not merely that it finished. Summed over
+            // every file, because a size-changing recording becomes several.
+            let written: i64 = result
+                .outputs
+                .iter()
+                .filter_map(|path| std::fs::metadata(path).ok())
+                .filter_map(|meta| i64::try_from(meta.len()).ok())
+                .sum();
+            if written > 0 {
+                let _ = context.store.set_output_bytes(&job.id, written).await;
+            }
+
             context
                 .store
                 .finish(
