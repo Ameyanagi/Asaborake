@@ -193,6 +193,8 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
         .await;
     }
 
+    let job = rename_output(context, job).await;
+
     if let Some(message) = no_room_for(&job) {
         fail(context, &job, &message).await;
         return Ok(());
@@ -336,6 +338,54 @@ async fn record(
     }
 
     Ok(())
+}
+
+/// Name the output after the programme, when a template says how.
+///
+/// `EPGStation` hands over a path it chose; everything needed to file the
+/// result properly is already known. Any directories the template builds are
+/// created here rather than being discovered missing by ffmpeg an hour later.
+async fn rename_output(context: &Context, mut job: Job) -> Job {
+    let Some(template) = context.config.output_template.as_deref() else {
+        return job;
+    };
+
+    let fields = asaborake_core::Fields {
+        title: job.title.clone(),
+        channel: job.channel_name.clone().or_else(|| job.channel_id.clone()),
+        recorded_at: Some(job.created_at.into()),
+        source: std::path::Path::new(&job.input)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned()),
+    };
+
+    let Some(renamed) =
+        asaborake_core::rename(std::path::Path::new(&job.output), template, &fields)
+    else {
+        return job;
+    };
+    if renamed == std::path::Path::new(&job.output) {
+        return job;
+    }
+
+    if let Some(parent) = renamed.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!(%error, path = %parent.display(), "cannot make the output directory");
+        return job;
+    }
+
+    let renamed = renamed.to_string_lossy().into_owned();
+    log(
+        context,
+        &job.id,
+        "info",
+        &format!("writing to {renamed} rather than {}", job.output),
+    )
+    .await;
+    let _ = context.store.set_output(&job.id, &renamed).await;
+    job.output = renamed;
+    job
 }
 
 /// Why this job cannot start for lack of disk, if that is the case.

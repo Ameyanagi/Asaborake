@@ -50,6 +50,14 @@ pub struct Config {
     /// file nobody notices.
     #[serde(default = "default_low_confidence")]
     pub on_low_confidence: asaborake_cmcut::LowConfidencePolicy,
+    /// How to name the output, from the programme's own metadata.
+    ///
+    /// Placeholders: `{title}`, `{channel}`, `{date}`, `{time}`, `{year}`,
+    /// `{month}`, `{source}`. Slashes in the template build subdirectories
+    /// beneath wherever the caller asked for the output; slashes inside a
+    /// *title* cannot. Empty means the caller's path is used as it stands.
+    #[serde(default)]
+    pub output_template: Option<String>,
     /// Hours of the day during which jobs may run, 0 to 23.
     ///
     /// Empty means any time. An encode saturates a GPU for an hour, and the
@@ -107,6 +115,7 @@ impl Default for Config {
             logo_dir: default_logo_dir(),
             channels: default_channels(),
             run_hours: schedule::RunHours::default(),
+            output_template: None,
             concurrency: default_concurrency(),
             on_low_confidence: default_low_confidence(),
             recording_dirs: Vec::new(),

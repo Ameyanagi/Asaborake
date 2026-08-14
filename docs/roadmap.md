@@ -151,7 +151,11 @@ or so, M a few days, L a week or more.
     left alone, and the health endpoint reporting the schedule so a queue that
     is not moving explains itself. Sleeping or shutting down when the queue
     empties is still missing. **M**
-13. **Output naming from metadata**, genre folders, duplicate handling. **M**
+13. **Output naming from metadata.** ~~Naming and folders are done~~: a
+    template over `{title}`, `{channel}`, `{date}`, `{time}`, `{year}`,
+    `{month}` and `{source}`, where slashes in the *template* build
+    directories and slashes in a *title* cannot. Genre folders still need ARIB
+    genre parsing, which `asaborake-ts` does not do.
 14. **Source housekeeping.** Duplicate submissions and the free-space check
     are ~~done~~: the same recording to the same output returns the job already
     queued, and a job that could not fit is refused before it starts rather

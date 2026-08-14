@@ -311,6 +311,23 @@ impl Store {
         Ok(())
     }
 
+    /// Change where a job's output goes.
+    ///
+    /// Used when a naming template renames it, so the queue and the finished
+    /// record both point at the file that was actually written.
+    ///
+    /// # Errors
+    /// Returns [`Error::Database`] if the update fails.
+    pub async fn set_output(&self, id: &str, output: &str) -> Result<(), Error> {
+        sqlx::query("UPDATE jobs SET output = ? WHERE id = ?")
+            .bind(output)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(Error::Database)?;
+        Ok(())
+    }
+
     /// Record what the source recording contained, as JSON.
     ///
     /// Written when the job starts rather than when it finishes, so a job that

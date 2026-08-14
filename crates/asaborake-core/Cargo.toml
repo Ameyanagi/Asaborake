@@ -16,6 +16,7 @@ asaborake-analyze = { workspace = true }
 asaborake-cmcut = { workspace = true }
 asaborake-media = { workspace = true }
 asaborake-ts = { workspace = true }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
