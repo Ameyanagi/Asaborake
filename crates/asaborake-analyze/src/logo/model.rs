@@ -47,6 +47,13 @@ const MAGIC: &[u8; 4] = b"ABL1";
 /// rather than guessed about.
 pub const STRONG_ALPHA: f32 = 0.20;
 
+/// Frame count standing for "this came from a file, not from a measurement".
+///
+/// A logo imported from Amatsukaze has no frame count of its own, and the
+/// plausibility check needs one. Reporting a made-up number as though it had
+/// been measured would be worse than saying where it came from.
+pub const IMPORTED: u32 = u32::MAX;
+
 /// Largest slope kept, which is an opacity of 0.98.
 ///
 /// Opacity is `1 - 1/A`, so a fully opaque pixel has an infinite `A`. Infinity
@@ -397,6 +404,121 @@ impl LogoData {
     }
 }
 
+/// Amatsukaze's own logo file, so an existing pack can be reused.
+///
+/// Working detection is a chicken and egg problem — a channel's logo has to be
+/// learned before anything can be cut, and learning it needs a recording with
+/// the logo clearly visible. Anybody who has been running Amatsukaze already
+/// has the answer in a `.lgd` file.
+///
+/// Format from `reference/Amatsukaze/Amatsukaze/AMTLogo.hpp`: a fixed header,
+/// then the coefficient planes as little-endian floats in the order
+/// `aY, aU, aV, bY, bU, bV`. The chroma planes are read past rather than used,
+/// because Asaborake's detector only looks at luma — and the `a`/`b`
+/// convention is the same one, so the numbers transfer without conversion.
+pub mod lgd {
+    use super::{IMPORTED, LogoData, Rect};
+    use crate::Error;
+
+    /// `magic` at the head of an extended logo file.
+    const MAGIC: i32 = 0x0001_2345;
+
+    /// Size of `LogoHeader`, including the padding before `serviceId`.
+    const HEADER: usize = 540;
+
+    /// Read a four-byte little-endian integer.
+    fn read_i32(bytes: &[u8], at: usize) -> Option<i32> {
+        bytes
+            .get(at..at + 4)
+            .and_then(|slice| slice.try_into().ok())
+            .map(i32::from_le_bytes)
+    }
+
+    /// Parse an Amatsukaze `.lgd` file.
+    ///
+    /// # Errors
+    /// Returns [`Error::LogoFormat`] when the file is not one, and
+    /// [`Error::LogoGeometry`] when its dimensions do not describe a logo.
+    pub fn parse(bytes: &[u8], channel_id: Option<String>) -> Result<LogoData, Error> {
+        if read_i32(bytes, 0) != Some(MAGIC) {
+            return Err(Error::LogoFormat);
+        }
+
+        let field = |at: usize| read_i32(bytes, at).ok_or(Error::LogoFormat);
+        let (width, height) = (field(8)?, field(12)?);
+        let (log_uv_x, log_uv_y) = (field(16)?, field(20)?);
+        let (image_x, image_y) = (field(32)?, field(36)?);
+
+        let usable = |value: i32| u32::try_from(value).ok().filter(|v| *v > 0);
+        let (Some(width), Some(height)) = (usable(width), usable(height)) else {
+            return Err(Error::LogoGeometry);
+        };
+        let (Some(x), Some(y)) = (
+            u32::try_from(image_x.max(0)).ok(),
+            u32::try_from(image_y.max(0)).ok(),
+        ) else {
+            return Err(Error::LogoGeometry);
+        };
+
+        // The name is a fixed 255 bytes, terminated by a zero if it is short.
+        let name = bytes
+            .get(40..295)
+            .map(|raw| {
+                let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+                String::from_utf8_lossy(&raw[..end]).into_owned()
+            })
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "imported".to_owned());
+
+        let luma = (width * height) as usize;
+        // Chroma is subsampled by the shifts the header carries.
+        let chroma = ((width >> log_uv_x.max(0)) * (height >> log_uv_y.max(0))) as usize;
+
+        // aY, then the two chroma a planes, then bY. Only the luma planes are
+        // read; the detector never looks at chroma.
+        let plane = |start: usize| -> Option<Vec<f32>> {
+            let bytes = bytes.get(HEADER + start * 4..HEADER + (start + luma) * 4)?;
+            Some(
+                bytes
+                    .chunks_exact(4)
+                    .filter_map(|c| c.try_into().ok().map(f32::from_le_bytes))
+                    .collect(),
+            )
+        };
+        let (Some(a), Some(b)) = (plane(0), plane(luma + chroma * 2)) else {
+            return Err(Error::LogoFormat);
+        };
+        if a.len() != luma || b.len() != luma {
+            return Err(Error::LogoFormat);
+        }
+
+        let mut logo = LogoData {
+            name,
+            channel_id,
+            source_width: 0,
+            source_height: 0,
+            rect: Rect {
+                x,
+                y,
+                width,
+                height,
+            },
+            a,
+            b,
+            // Nothing in the file says how many frames it was fitted from,
+            // and the plausibility check needs a number. It came from
+            // Amatsukaze, which holds itself to the same bar, so it is
+            // trusted — and marked as imported rather than given a made-up
+            // count that would be reported as though it had been measured.
+            frames_used: IMPORTED,
+        };
+        // Written by a different program, so the coefficients are treated the
+        // way any other file's are.
+        logo.scrub();
+        Ok(logo)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,6 +565,85 @@ mod tests {
             // And compositing is the exact inverse.
             assert_relative_eq!(logo.apply(0, background), observed, epsilon = 1e-5);
         }
+    }
+
+    /// Build an Amatsukaze extended logo file, to the layout in AMTLogo.hpp.
+    fn lgd_file(width: u32, height: u32, alpha: f32, name: &str) -> Vec<u8> {
+        let mut header = Vec::new();
+        for value in [
+            0x0001_2345i32,
+            1,
+            width.cast_signed(),
+            height.cast_signed(),
+            1, // logUVx: 4:2:0
+            1, // logUVy
+            1440,
+            1080,
+            40, // imgx
+            24, // imgy
+        ] {
+            header.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut label = name.as_bytes().to_vec();
+        label.resize(255, 0);
+        header.extend_from_slice(&label);
+        header.push(0); // padding before the 4-aligned serviceId
+        header.extend_from_slice(&1024i32.to_le_bytes());
+        header.extend_from_slice(&[0u8; 240]); // reserved
+
+        assert_eq!(header.len(), 540, "the header must match the C struct");
+
+        let luma = (width * height) as usize;
+        let chroma = ((width >> 1) * (height >> 1)) as usize;
+        let mut body = Vec::new();
+        // aY: the slope a logo of this opacity produces.
+        for _ in 0..luma {
+            body.extend_from_slice(&(1.0f32 / (1.0 - alpha)).to_le_bytes());
+        }
+        // aU and aV, which are read past.
+        for _ in 0..chroma * 2 {
+            body.extend_from_slice(&1.0f32.to_le_bytes());
+        }
+        // bY.
+        for _ in 0..luma {
+            body.extend_from_slice(&(-0.25f32).to_le_bytes());
+        }
+        for _ in 0..chroma * 2 {
+            body.extend_from_slice(&0.0f32.to_le_bytes());
+        }
+
+        header.extend_from_slice(&body);
+        header
+    }
+
+    #[test]
+    fn an_amatsukaze_logo_file_can_be_read() {
+        // Working detection is a chicken and egg problem, and anybody already
+        // running Amatsukaze has the answer in one of these.
+        let file = lgd_file(16, 12, 0.5, "日本テレビ");
+        let logo = lgd::parse(&file, Some("1040".to_owned())).expect("reads");
+
+        assert_eq!(logo.name, "日本テレビ");
+        assert_eq!(logo.channel_id.as_deref(), Some("1040"));
+        assert_eq!(logo.rect.width, 16);
+        assert_eq!(logo.rect.height, 12);
+        // The rectangle's position comes from the header, not from zero.
+        assert_eq!((logo.rect.x, logo.rect.y), (40, 24));
+
+        // And the opacity survives, because the a/b convention is the same.
+        assert_relative_eq!(logo.alpha_at(0), 0.5, epsilon = 1e-5);
+        assert!(logo.is_plausible());
+    }
+
+    #[test]
+    fn something_that_is_not_a_logo_file_is_refused() {
+        assert!(lgd::parse(b"not a logo", None).is_err());
+        assert!(lgd::parse(&[], None).is_err());
+
+        // Right magic, truncated body: the planes are not all there.
+        let mut short = lgd_file(16, 12, 0.5, "x");
+        short.truncate(600);
+        assert!(lgd::parse(&short, None).is_err());
     }
 
     #[test]

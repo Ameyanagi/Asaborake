@@ -200,6 +200,22 @@ enum LogoCommand {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Import an Amatsukaze `.lgd` logo file.
+    // Backticks read badly in --help.
+    #[command(about = "Import an Amatsukaze .lgd logo file")]
+    Import {
+        /// The .lgd file.
+        file: PathBuf,
+        /// Channel id to store it against.
+        #[arg(long)]
+        channel_id: String,
+        /// Picture width the logo was measured against.
+        #[arg(long)]
+        width: u32,
+        /// Picture height.
+        #[arg(long)]
+        height: u32,
+    },
     /// Forget a stored logo, so it is learned again next time.
     Forget {
         /// Channel id.
@@ -617,7 +633,7 @@ fn logo(cli: &Cli, command: &LogoCommand) -> Result<()> {
             }
             for logo in logos {
                 println!(
-                    "{:<24} {}x{}  rect {}x{}+{}+{}  opacity {:.2}  {} frames",
+                    "{:<24} {}x{}  rect {}x{}+{}+{}  opacity {:.2}  {}",
                     logo.channel_id.as_deref().unwrap_or("?"),
                     logo.source_width,
                     logo.source_height,
@@ -626,7 +642,11 @@ fn logo(cli: &Cli, command: &LogoCommand) -> Result<()> {
                     logo.rect.x,
                     logo.rect.y,
                     logo.mean_alpha(),
-                    logo.frames_used,
+                    if logo.frames_used == asaborake_analyze::logo::model::IMPORTED {
+                        "imported".to_owned()
+                    } else {
+                        format!("{} frames", logo.frames_used)
+                    },
                 );
             }
             Ok(())
@@ -654,6 +674,30 @@ fn logo(cli: &Cli, command: &LogoCommand) -> Result<()> {
             } else {
                 println!("no logo for channel {channel_id} at {width}x{height}");
             }
+            Ok(())
+        }
+        LogoCommand::Import {
+            file,
+            channel_id,
+            width,
+            height,
+        } => {
+            let bytes =
+                std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+            let mut logo = asaborake_analyze::lgd::parse(&bytes, Some(channel_id.clone()))
+                .with_context(|| format!("reading {} as an Amatsukaze logo", file.display()))?;
+
+            // The file says how big the logo is, not what picture it was
+            // measured against, and the store is keyed on the latter.
+            logo.source_width = *width;
+            logo.source_height = *height;
+
+            let path = store.save(&logo)?;
+            println!(
+                "imported '{}' for channel {channel_id} at {width}x{height}",
+                logo.name
+            );
+            println!("stored as {}", path.display());
             Ok(())
         }
     }

@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use asaborake_media::{Ffmpeg, FrameReader, FrameReaderOptions, MediaProbe};
 use serde::{Deserialize, Serialize};
 
+pub use logo::model::lgd;
 pub use logo::{LogoData, LogoDetector, LogoInterval, LogoLocator, LogoScanner, LogoTrack, Rect};
 pub use scene::{SceneChange, SceneDetector, SceneOptions};
 

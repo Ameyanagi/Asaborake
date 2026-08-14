@@ -134,8 +134,12 @@ or so, M a few days, L a week or more.
    holds a job in a `blocked` state before the encode rather than after it,
    with a message naming what it needs. Deliberately not coloured as a
    failure. Off by default.
-9. **Amatsukaze `.lgd` import.** Existing logo packs are the fastest route to
-   working detection, and the format is documented in `LogoScan.hpp`. **S**
+9. ~~**Amatsukaze `.lgd` import.**~~ **Done.** `asaborake logo import` reads an
+   extended logo file — header from `AMTLogo.hpp`, then the coefficient planes
+   as little-endian floats. The `a`/`b` convention is the same, so the numbers
+   transfer without conversion; the chroma planes are read past because the
+   detector only looks at luma. An imported logo is marked as imported rather
+   than given a frame count it never had.
 
 ### Stage 3 — leave it alone overnight
 
