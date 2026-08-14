@@ -46,6 +46,26 @@ pub struct FrameReaderOptions {
     /// Stop after this many seconds of the recording.
     pub duration_seconds: Option<f64>,
 
+    /// Decode only keyframes.
+    ///
+    /// Learning a logo wants frames spread across a recording with a variety
+    /// of backgrounds behind them, not consecutive ones — and broadcast puts a
+    /// keyframe in twice a second, so a twenty-minute recording still offers a
+    /// couple of thousand. Skipping everything else is most of the decoding
+    /// work, and decoding is where the time goes.
+    ///
+    /// Useless for detection, which needs the exact frame a logo appears on.
+    pub keyframes_only: bool,
+
+    /// Return only this part of the picture, as `(x, y, width, height)`.
+    ///
+    /// Learning a logo reads one small rectangle and nothing else, so sending
+    /// whole frames down the pipe moves a thousand times more data than the
+    /// work needs — fifteen gigabytes rather than forty megabytes on a
+    /// twenty-minute recording. Frames come back cropped, so a caller using
+    /// this addresses them from the crop's own origin.
+    pub crop: Option<(u32, u32, u32, u32)>,
+
     /// Hardware decoder to request, e.g. `cuda`.
     ///
     /// Frames still come back over the pipe in system memory, so this trades
@@ -150,7 +170,10 @@ impl FrameReader {
         })?;
 
         let step = options.select_every.max(1);
-        let (width, height) = options.scale.unwrap_or((video.width, video.height));
+        let (width, height) = options
+            .scale
+            .or(options.crop.map(|(_, _, w, h)| (w, h)))
+            .unwrap_or((video.width, video.height));
         if width == 0 || height == 0 {
             return Err(Error::NoVideoStream {
                 path: input.to_path_buf(),
@@ -167,6 +190,11 @@ impl FrameReader {
         }
         if let Some(hwaccel) = &options.hwaccel {
             command.args(["-hwaccel", hwaccel]);
+        }
+        // An input option: it tells the decoder to throw the frames away
+        // before doing the work, rather than filtering them afterwards.
+        if options.keyframes_only {
+            command.args(["-skip_frame", "nokey"]);
         }
         // Corrupt packets are normal in terrestrial recordings; dropping them
         // beats aborting the analysis of an otherwise fine programme.
@@ -321,6 +349,10 @@ fn build_filter(options: &FrameReaderOptions, step: u32) -> String {
     }
     if step > 1 {
         filters.push(format!("select='not(mod(n\\,{step}))'"));
+    }
+    // After selection, so the pixels of discarded frames are never touched.
+    if let Some((x, y, width, height)) = options.crop {
+        filters.push(format!("crop={width}:{height}:{x}:{y}"));
     }
     if let Some((width, height)) = options.scale {
         filters.push(format!("scale={width}:{height}:flags=bilinear"));

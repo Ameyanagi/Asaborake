@@ -701,6 +701,16 @@ struct ScanRequest {
     /// Human-readable name.
     #[serde(default)]
     name: Option<String>,
+    /// How much the box's border may vary and still count as flat.
+    ///
+    /// Raising it accepts more frames from a noisy corner, at the cost of
+    /// letting some picture into what is taken for background.
+    #[serde(default = "default_flatness")]
+    flatness: u8,
+}
+
+const fn default_flatness() -> u8 {
+    asaborake_analyze::logo::DEFAULT_FLATNESS_THRESHOLD
 }
 
 /// Learn a logo from a rectangle and add it to the store.
@@ -735,6 +745,7 @@ async fn scan_logo(
     let ffmpeg = std::sync::Arc::clone(&context.ffmpeg);
     let store = std::sync::Arc::clone(store);
     let rect = request.rect;
+    let flatness = request.flatness;
     let options = asaborake_analyze::AnalysisOptions {
         logo_name: request
             .name
@@ -753,7 +764,8 @@ async fn scan_logo(
         }
         // Nothing usable. Measure the same rectangle again without the
         // plausibility bar, so the answer can say *why* rather than just no.
-        let report = asaborake_analyze::scan_rect(&ffmpeg, &path, rect, &options, &mut |_| {})?;
+        let report =
+            asaborake_analyze::scan_rect(&ffmpeg, &path, rect, flatness, &options, &mut |_| {})?;
         Ok(Err(report))
     })
     .await
@@ -770,6 +782,7 @@ async fn scan_logo(
                 "background_spread": report.background_spread,
                 "mean_alpha": report.mean_alpha,
                 "strong_pixels": report.strong_pixels,
+                "border_spread": report.typical_border_spread,
                 // The rejected fit, so an operator can see whether the box was
                 // aimed at the right thing. A recognisable logo that failed the
                 // bar and a rectangle full of noise look nothing alike, and no

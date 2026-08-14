@@ -340,6 +340,9 @@ const REFINEMENT_GATE: f32 = 0.25;
 /// could never work, and those need opposite responses.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScanReport {
+    /// Whether the scan stopped once it had seen enough, rather than reading
+    /// the whole recording.
+    pub stopped_early: bool,
     /// Frames whose surroundings were flat enough to imply a background.
     pub frames_used: u32,
     /// Range of background brightnesses those frames covered, of 255.
@@ -348,6 +351,9 @@ pub struct ScanReport {
     pub mean_alpha: f32,
     /// Pixels opaque enough to match against.
     pub strong_pixels: usize,
+    /// How flat the box's border typically was, against a limit of
+    /// [`DEFAULT_FLATNESS_THRESHOLD`](logo::DEFAULT_FLATNESS_THRESHOLD).
+    pub typical_border_spread: u8,
     /// The fit itself, even when it was rejected — seeing it is what tells an
     /// operator whether the box was aimed at the right thing.
     pub logo: Option<LogoData>,
@@ -358,11 +364,23 @@ impl ScanReport {
     #[must_use]
     pub fn explain(&self) -> String {
         if self.frames_used < 50 {
+            let limit = logo::DEFAULT_FLATNESS_THRESHOLD;
             return format!(
-                "only {} frames had a flat enough background to use. The box may be \
-                 overlapping busy picture — try tightening it around the logo, or pick \
-                 a recording with calmer material behind it.",
-                self.frames_used
+                "only {} frames had a flat enough background to use. The edge of the box \
+                 has to sit on plain background, and yours varied by about {} levels of \
+                 brightness where the limit is {}. {}",
+                self.frames_used,
+                self.typical_border_spread,
+                limit,
+                if self.typical_border_spread > limit * 4 {
+                    "That is a long way over: the box is almost certainly crossing \
+                     picture rather than sitting in a clear corner. Move or shrink it \
+                     so all four edges are on flat background."
+                } else {
+                    "That is close: nudge the box so its edges clear the logo and any \
+                     nearby graphics, or raise the flatness limit if the corner is \
+                     simply noisy."
+                }
             );
         }
         if self.background_spread < 24 {
@@ -383,6 +401,18 @@ impl ScanReport {
     }
 }
 
+/// Accepted frames that make another one pointless.
+///
+/// Amatsukaze caps its own scan for the same reason. Comfortably more than the
+/// fifty a fit is held to, and comfortably less than a whole recording.
+const ENOUGH_FRAMES: u32 = 400;
+
+/// Brightness range those frames must span before the cap applies.
+///
+/// Without this the scan could stop on four hundred frames of the same dark
+/// corner, which is the one thing that makes a fit impossible.
+const ENOUGH_SPREAD: u8 = 96;
+
 /// Scan a rectangle and report what was found, usable or not.
 ///
 /// One pass, and no plausibility bar: this exists to explain a failure, so it
@@ -394,6 +424,7 @@ pub fn scan_rect(
     ffmpeg: &Ffmpeg,
     input: &Path,
     rect: Rect,
+    flatness: u8,
     options: &AnalysisOptions,
     on_progress: &mut dyn FnMut(AnalysisProgress),
 ) -> Result<ScanReport, Error> {
@@ -405,24 +436,59 @@ pub fn scan_rect(
         }));
     };
 
+    // Only this rectangle is ever read, so only this rectangle is decoded and
+    // sent. On a twenty-minute recording that is forty megabytes down the pipe
+    // rather than fifteen gigabytes, which is the difference between a scan
+    // somebody waits through and one they give up on.
+    let crop = (rect.x, rect.y, rect.width, rect.height);
+    let local = Rect {
+        x: 0,
+        y: 0,
+        width: rect.width,
+        height: rect.height,
+    };
+
     // A rectangle that reached here was drawn by somebody looking at the
     // picture, so its border is genuine background and is judged end to end.
-    let mut scanner = LogoScanner::strict(rect, logo::DEFAULT_FLATNESS_THRESHOLD);
-    let mut reader = open_reader(ffmpeg, input, &probe, options, options.learn_step)?;
+    let mut scanner = LogoScanner::strict(local, flatness);
+    // Every keyframe rather than every second frame: the same spread of
+    // backgrounds for a fraction of the decoding.
+    let mut reader = open_reader_cropped(ffmpeg, input, &probe, options, 1, Some(crop))?;
+    let mut stopped_early = false;
     while let Some(frame) = reader.next_frame().map_err(Error::Media)? {
         report(&frame, Stage::LearningLogo, duration, on_progress);
         scanner.add_frame(&frame);
+
+        // Enough is enough. The fit needs frames whose backgrounds *differ*,
+        // and once it has hundreds of them spanning most of the brightness
+        // range, another ten thousand tell it nothing it does not already
+        // know — while costing the rest of a twenty-minute decode, which is
+        // the difference between a scan somebody waits through and one they
+        // abandon. Amatsukaze caps its own scan for the same reason.
+        if scanner.frames_accepted() >= ENOUGH_FRAMES
+            && scanner.background_spread() >= ENOUGH_SPREAD
+        {
+            stopped_early = true;
+            break;
+        }
     }
 
-    let logo = scanner.finish_bootstrap(
+    let mut logo = scanner.finish_bootstrap(
         options.logo_name.clone(),
         options.channel_id.clone(),
         (video.width, video.height),
     );
+    // The fit was made in the crop's coordinates; the detector works in the
+    // picture's, so the rectangle is put back where it came from.
+    if let Some(logo) = logo.as_mut() {
+        logo.rect = rect;
+    }
 
     Ok(ScanReport {
+        stopped_early,
         frames_used: scanner.frames_accepted(),
         background_spread: scanner.background_spread(),
+        typical_border_spread: scanner.typical_border_spread().unwrap_or(0),
         mean_alpha: logo.as_ref().map_or(0.0, LogoData::mean_alpha),
         strong_pixels: logo.as_ref().map_or(0, LogoData::strong_pixels),
         logo,
@@ -610,15 +676,38 @@ fn scan_pass(
     };
 
     let is_bootstrap = gate.is_none();
+    // The refinement pass scores whole frames through the detector, so it
+    // needs them whole; the first pass only ever reads the rectangle.
+    let crop = (gate.is_none() && options.logo_rect.is_some()).then_some((
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+    ));
+    let scan_rect = if crop.is_some() {
+        Rect {
+            x: 0,
+            y: 0,
+            width: rect.width,
+            height: rect.height,
+        }
+    } else {
+        rect
+    };
     // A rectangle the operator supplied is a tight box round the logo and its
     // border is real background; one the locator inferred is a loose bounding
     // box whose border cannot be held to the same standard.
     let mut scanner = if options.logo_rect.is_some() {
-        LogoScanner::strict(rect, logo::DEFAULT_FLATNESS_THRESHOLD)
+        LogoScanner::strict(scan_rect, logo::DEFAULT_FLATNESS_THRESHOLD)
     } else {
-        LogoScanner::new(rect, logo::DEFAULT_FLATNESS_THRESHOLD)
+        LogoScanner::new(scan_rect, logo::DEFAULT_FLATNESS_THRESHOLD)
     };
-    let mut reader = open_reader(ffmpeg, input, probe, options, options.learn_step)?;
+    let step = if crop.is_some() {
+        1
+    } else {
+        options.learn_step
+    };
+    let mut reader = open_reader_cropped(ffmpeg, input, probe, options, step, crop)?;
 
     while let Some(frame) = reader.next_frame().map_err(Error::Media)? {
         report(&frame, Stage::LearningLogo, duration, on_progress);
@@ -637,11 +726,19 @@ fn scan_pass(
     // The bootstrap is allowed to be a poor logo — it only has to be good
     // enough to recognise its own frames. The refined fit is held to the bar
     // that decides whether a logo is usable at all.
-    Ok(if is_bootstrap {
+    let mut fitted = if is_bootstrap {
         scanner.finish_bootstrap(name, channel, size)
     } else {
         scanner.finish(name, channel, size)
-    })
+    };
+    // Put the rectangle back into the picture's coordinates when the scan was
+    // done in a crop's.
+    if crop.is_some()
+        && let Some(logo) = fitted.as_mut()
+    {
+        logo.rect = rect;
+    }
+    Ok(fitted)
 }
 
 /// Open a frame reader with the analysis pass's shared settings.
@@ -652,13 +749,29 @@ fn open_reader(
     options: &AnalysisOptions,
     step: u32,
 ) -> Result<FrameReader, Error> {
+    open_reader_cropped(ffmpeg, input, probe, options, step, None)
+}
+
+/// As above, but returning only part of the picture.
+fn open_reader_cropped(
+    ffmpeg: &Ffmpeg,
+    input: &Path,
+    probe: &MediaProbe,
+    options: &AnalysisOptions,
+    step: u32,
+    crop: Option<(u32, u32, u32, u32)>,
+) -> Result<FrameReader, Error> {
     FrameReader::open(
         ffmpeg,
         input,
         probe,
         &FrameReaderOptions {
             deinterlace: options.deinterlace,
+            // Keyframes are enough to learn from and are a fraction of the
+            // work; consecutive frames only matter when a step is asked for.
+            keyframes_only: crop.is_some() && step <= 1,
             select_every: step,
+            crop,
             ..FrameReaderOptions::default()
         },
     )

@@ -111,6 +111,12 @@ pub struct LogoScanner {
     brightest_background: u8,
     /// Whether the border must be flat end to end, or merely mostly flat.
     strict: bool,
+    /// How flat the border was on every frame offered, accepted or not.
+    ///
+    /// The number that turns "one usable frame" into something actionable: it
+    /// says whether the box was just over the line or nowhere near it, which
+    /// need completely different responses.
+    spreads: Vec<u8>,
     /// Reusable buffer for the border samples, to keep the hot loop allocation
     /// free across tens of thousands of frames.
     border: Vec<u8>,
@@ -128,6 +134,7 @@ impl LogoScanner {
             darkest_background: u8::MAX,
             brightest_background: u8::MIN,
             strict: false,
+            spreads: Vec::new(),
             border: Vec::new(),
         }
     }
@@ -164,6 +171,19 @@ impl LogoScanner {
     #[must_use]
     pub const fn frames_accepted(&self) -> u32 {
         self.frames
+    }
+
+    /// How flat the border typically was, across every frame offered.
+    ///
+    /// `None` when no frame was ever looked at.
+    #[must_use]
+    pub fn typical_border_spread(&self) -> Option<u8> {
+        if self.spreads.is_empty() {
+            return None;
+        }
+        let mut sorted = self.spreads.clone();
+        sorted.sort_unstable();
+        sorted.get(sorted.len() / 2).copied()
     }
 
     /// The range of background brightnesses the accepted frames covered.
@@ -257,7 +277,11 @@ impl LogoScanner {
                 percentile(&self.border, 0.90)?,
             )
         };
-        if high.saturating_sub(low) > self.flatness_threshold {
+        let spread = high.saturating_sub(low);
+        // Recorded whether or not the frame is accepted, because the rejected
+        // ones are what say how far off the box is.
+        self.spreads.push(spread);
+        if spread > self.flatness_threshold {
             return None;
         }
 
