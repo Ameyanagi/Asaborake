@@ -168,8 +168,7 @@ async fn run_job(context: &Context, job: Job) -> Result<(), Error> {
     // A channel may override what the job asked for. NHK carries no
     // advertising, so looking for commercials in it spends a pass to find
     // nothing; a film channel may want a better profile than the default.
-    let settings = asaborake_core::ChannelStore::open(&context.config.channels)
-        .get(job.channel_id.as_deref().unwrap_or_default());
+    let settings = settings_for(context, &job).await;
 
     let wanted = settings
         .profile
@@ -338,6 +337,49 @@ async fn record(
     }
 
     Ok(())
+}
+
+/// How this recording should be treated, from the channel and the rules.
+///
+/// The channel is the general case and a rule is the particular one, so a
+/// matching rule has the last word.
+async fn settings_for(context: &Context, job: &Job) -> asaborake_core::ChannelSettings {
+    let mut settings = asaborake_core::ChannelStore::open(&context.config.channels)
+        .get(job.channel_id.as_deref().unwrap_or_default());
+
+    // A rule names a more particular case than a whole channel does, so where
+    // one matches it has the last word.
+    let matched = asaborake_core::RuleSet::open(&context.config.rules).first_match(
+        &asaborake_core::Candidate {
+            channel_id: job.channel_id.clone(),
+            title: job.title.clone(),
+            path: Some(job.input.clone()),
+            // The picture size is not known until the source is probed, which
+            // happens inside the pipeline. Rules that ask about it match only
+            // once that is hoisted out; until then they simply do not fire.
+            height: None,
+        },
+    );
+    if let Some(rule) = &matched {
+        if let Some(profile) = &rule.profile {
+            settings.profile = Some(profile.clone());
+        }
+        if let Some(detect) = rule.detect_commercials {
+            settings.detect_commercials = detect;
+        }
+        log(
+            context,
+            &job.id,
+            "info",
+            &format!(
+                "matched the rule '{}'",
+                rule.name.as_deref().unwrap_or("(unnamed)")
+            ),
+        )
+        .await;
+    }
+
+    settings
 }
 
 /// Name the output after the programme, when a template says how.

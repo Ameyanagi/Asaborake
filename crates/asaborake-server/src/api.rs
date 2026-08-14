@@ -38,6 +38,7 @@ pub fn router(context: Context) -> Router {
             "/api/v1/logos/no-logo/{channel}",
             post(mark_no_logo).delete(clear_no_logo),
         )
+        .route("/api/v1/rules", get(list_rules).put(replace_rules))
         .route("/api/v1/channels", get(list_channels))
         .route(
             "/api/v1/channels/{id}",
@@ -377,6 +378,34 @@ async fn clear_no_logo(
         .clear_no_logo(&channel)
         .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(Json(json!({ "channel_id": channel, "cleared": cleared })))
+}
+
+/// The auto-selection rules, in the order they are tried.
+async fn list_rules(State(context): State<Context>) -> Json<Vec<asaborake_core::Rule>> {
+    Json(asaborake_core::RuleSet::open(&context.config.rules).all())
+}
+
+/// Replace the whole list, because their order is part of their meaning.
+async fn replace_rules(
+    State(context): State<Context>,
+    Json(rules): Json<Vec<asaborake_core::Rule>>,
+) -> ApiResult<Json<Value>> {
+    let profiles = asaborake_core::profile::builtin();
+    for rule in &rules {
+        if let Some(profile) = &rule.profile
+            && !profiles.contains_key(profile)
+        {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                format!("no profile named '{profile}'"),
+            ));
+        }
+    }
+
+    asaborake_core::RuleSet::open(&context.config.rules)
+        .replace(&rules)
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(json!({ "rules": rules.len() })))
 }
 
 /// Per-channel settings, keyed by channel id.

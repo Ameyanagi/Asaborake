@@ -18,6 +18,7 @@ pub mod naming;
 pub mod parts;
 pub mod pipeline;
 pub mod profile;
+pub mod rules;
 pub mod store;
 
 use std::path::PathBuf;
@@ -29,6 +30,7 @@ pub use naming::{Fields, rename};
 pub use parts::{Part, split};
 pub use pipeline::{JobOutcome, JobRequest, PipelineProgress, Sidecar, inspect, run};
 pub use profile::{Container, Profile, builtin};
+pub use rules::{Candidate, Rule, RuleSet};
 pub use store::LogoStore;
 
 /// Errors from the pipeline.

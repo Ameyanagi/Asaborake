@@ -65,6 +65,13 @@ pub struct Config {
     /// television on.
     #[serde(default)]
     pub run_hours: schedule::RunHours,
+    /// Where the auto-selection rules live.
+    ///
+    /// Tried in file order, first match wins, and a matching rule overrides
+    /// the channel's own settings — a rule names a more particular case than a
+    /// whole channel does.
+    #[serde(default = "default_rules")]
+    pub rules: PathBuf,
     /// Where per-channel settings live.
     #[serde(default = "default_channels")]
     pub channels: PathBuf,
@@ -95,6 +102,9 @@ fn default_listen() -> String {
 fn default_database() -> PathBuf {
     PathBuf::from("/var/lib/asaborake/jobs.db")
 }
+fn default_rules() -> PathBuf {
+    PathBuf::from("/var/lib/asaborake/rules.json")
+}
 fn default_channels() -> PathBuf {
     PathBuf::from("/var/lib/asaborake/channels.json")
 }
@@ -114,6 +124,7 @@ impl Default for Config {
             database: default_database(),
             logo_dir: default_logo_dir(),
             channels: default_channels(),
+            rules: default_rules(),
             run_hours: schedule::RunHours::default(),
             output_template: None,
             concurrency: default_concurrency(),
